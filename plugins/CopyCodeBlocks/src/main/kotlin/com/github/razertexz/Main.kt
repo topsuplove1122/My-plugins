@@ -7,21 +7,21 @@ import android.view.View
 import android.view.MotionEvent
 import android.graphics.Color
 import androidx.recyclerview.widget.RecyclerView
-import androidx.recyclerview.widget.LinearLayoutManager
 import android.view.ViewGroup
+
+// 引入 Fragment 以解決 onViewCreated 找不到的問題
+import androidx.fragment.app.Fragment 
 
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.*
-// 移除會報錯的 PreHookParam Import，改用自動推斷
 import com.aliucord.Utils
 import com.aliucord.utils.DimenUtils
 
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
-import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
-import com.discord.widgets.chat.list.WidgetChatList
+// 移除 WidgetChatList 的 Import，改用字串判斷，避免類別參照錯誤
 
 import com.lytefast.flexinput.R
 
@@ -34,20 +34,28 @@ class Main : Plugin() {
 
     override fun start(ctx: Context) {
         // ==========================================
-        //  功能 0: 監聽「跳到底部」按鈕
+        //  功能 0: 監聽「跳到底部」按鈕 (修復崩潰版)
         // ==========================================
-        patcher.after<WidgetChatList>("onViewCreated", View::class.java, android.os.Bundle::class.java) {
-            val view = it.args[0] as View
-            val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
-            
-            if (scrollBtnId != 0) {
-                val scrollBtn = view.findViewById<View>(scrollBtnId)
-                if (scrollBtn != null) {
-                    scrollBtn.setOnTouchListener { _, event ->
-                        if (event.action == MotionEvent.ACTION_DOWN) {
-                            lastJumpRequestTime = System.currentTimeMillis()
+        
+        // 【關鍵修改】改成 Hook 'Fragment'，而不是 'WidgetChatList'
+        // 因為 WidgetChatList 沒有定義 onViewCreated，但 Fragment 一定有。
+        patcher.after<Fragment>("onViewCreated", View::class.java, android.os.Bundle::class.java) {
+            // 檢查當前的物件是不是聊天室 (WidgetChatList)
+            // 使用字串名稱比對，最安全，不會有 Import 錯誤
+            if (it.thisObject::class.java.name == "com.discord.widgets.chat.list.WidgetChatList") {
+                val view = it.args[0] as View
+                val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
+                
+                if (scrollBtnId != 0) {
+                    val scrollBtn = view.findViewById<View>(scrollBtnId)
+                    if (scrollBtn != null) {
+                        scrollBtn.setOnTouchListener { _, event ->
+                            if (event.action == MotionEvent.ACTION_DOWN) {
+                                // 發放通行證
+                                lastJumpRequestTime = System.currentTimeMillis()
+                            }
+                            false 
                         }
-                        false 
                     }
                 }
             }
@@ -57,11 +65,6 @@ class Main : Plugin() {
         //  功能 1: 智慧型防捲動 (Anti-Scroll)
         // ==========================================
         
-        val chatAdapterClass = WidgetChatListAdapter::class.java
-
-        // 策略：直接把邏輯複製到各個 Hook 裡面，讓編譯器自動推斷型別
-        // 這樣就不需要 import PreHookParam 了
-
         // 1. 攔截 scrollToPosition
         patcher.before<RecyclerView>(
             "scrollToPosition", 
@@ -72,15 +75,15 @@ class Main : Plugin() {
                 val isAllowed = (System.currentTimeMillis() - lastJumpRequestTime) < 1500
                 if (!isAllowed) {
                     val adapter = (it.thisObject as RecyclerView).adapter
-                    // 確認是聊天室才攔截
-                    if (adapter != null && adapter::class.java == chatAdapterClass) {
+                    // 確認是聊天室 Adapter 才攔截
+                    if (adapter != null && adapter::class.java.name.contains("WidgetChatListAdapter")) {
                         it.result = null // 阻止執行
                     }
                 }
             } catch (e: Exception) {}
         }
 
-        // 2. 攔截 smoothScrollToPosition (這是 Discord 主要用的)
+        // 2. 攔截 smoothScrollToPosition (Discord 主要用這個)
         patcher.before<RecyclerView>(
             "smoothScrollToPosition", 
             Int::class.javaPrimitiveType!! 
@@ -89,16 +92,12 @@ class Main : Plugin() {
                 val isAllowed = (System.currentTimeMillis() - lastJumpRequestTime) < 1500
                 if (!isAllowed) {
                     val adapter = (it.thisObject as RecyclerView).adapter
-                    if (adapter != null && adapter::class.java == chatAdapterClass) {
+                    if (adapter != null && adapter::class.java.name.contains("WidgetChatListAdapter")) {
                         it.result = null
                     }
                 }
             } catch (e: Exception) {}
         }
-
-        // 3. 攔截 LinearLayoutManager (選用)
-        // 為了避免複雜度導致編譯錯誤，我們先只攔截上面兩個。
-        // 通常攔截 RecyclerView 本身就足夠了。
 
         // ==========================================
         //  功能 2: 複製按鈕 (Copy Buttons)
