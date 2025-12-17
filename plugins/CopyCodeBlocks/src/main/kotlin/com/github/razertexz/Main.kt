@@ -126,6 +126,47 @@ class Main : Plugin() {
             } else {
                 btnLink?.visibility = View.GONE
             }
+
+            // 取得聊天室 Adapter 的類別，用來辨識現在是不是在「聊天室」
+            // 如果不加這個檢查，你連伺服器列表、成員列表都滑不動了
+            val chatAdapterClass = com.discord.widgets.chat.list.adapter.WidgetChatListAdapter::class.java
+
+            // 1. 攔截瞬間跳轉 (scrollToPosition)
+            patcher.before<RecyclerView>("scrollToPosition", Int::class.javaPrimitiveType) {
+                val adapter = (it.thisObject as RecyclerView).adapter
+                // 檢查：只有當這個 RecyclerView 是「聊天室」的時候才攔截
+                if (adapter != null && adapter::class.java == chatAdapterClass) {
+                    it.result = null // 設為 null 代表「什麼都不做」，直接取消原本的執行
+                }
+            }
+
+            // 2. 攔截平滑捲動 (smoothScrollToPosition) <-- 這就是你之前註解無效的主因
+            patcher.before<RecyclerView>("smoothScrollToPosition", Int::class.javaPrimitiveType) {
+                val adapter = (it.thisObject as RecyclerView).adapter
+                if (adapter != null && adapter::class.java == chatAdapterClass) {
+                    it.result = null
+                }
+            }
+
+            // 3. 攔截帶有偏移量的跳轉 (scrollToPositionWithOffset)
+            // 這是 LinearLayoutManager 的方法，很多精確定位都用這個
+            patcher.before<androidx.recyclerview.widget.LinearLayoutManager>(
+                "scrollToPositionWithOffset", 
+                Int::class.javaPrimitiveType, 
+                Int::class.javaPrimitiveType
+            ) {
+                // 這裡比較麻煩，LayoutManager 不一定能直接拿到 Adapter
+                // 但我們可以檢查這個 LayoutManager 綁定的 RecyclerView
+                val layoutManager = it.thisObject as androidx.recyclerview.widget.LinearLayoutManager
+                // 這是個投機的檢查法：聊天室通常會設 stackFromEnd = true (訊息從底部開始堆疊)
+                // 或者你可以嘗試透過反射去抓 RecyclerView (比較慢)
+            
+                // 簡單判斷：如果這個行為發生時，我們正在看聊天室，就攔截
+                // 這裡為了保險，我們先只攔截 RecyclerView 的那兩個。
+                // 如果上面兩個攔截後還有漏網之魚，再考慮把這個打開。
+            
+                // it.result = null 
+            }
         }
     }
 
