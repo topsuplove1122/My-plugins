@@ -7,6 +7,7 @@ import android.view.MotionEvent
 import android.graphics.Color
 import android.os.Bundle
 
+// 引入 RecyclerView 相關類別
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.constraintlayout.widget.ConstraintLayout
@@ -32,17 +33,16 @@ class Main : Plugin() {
     // 標記：是否正在執行手動跳轉
     private var isManualJumping = false
     
-    // 用來儲存聊天室的 LayoutManager 實例，避免誤殺其他列表
-    private var targetLayoutManager: LinearLayoutManager? = null
+    // 用來儲存被我們替換掉的 RecyclerView，方便後續存取
+    private var chatRecycler: RecyclerView? = null
 
     override fun start(ctx: Context) {
         
         // ==========================================
-        //  功能 1: 鎖定目標 & 按鈕監聽
+        //  功能 1: 替換 LayoutManager (特洛伊木馬)
         // ==========================================
         
         patcher.after<Fragment>("onViewCreated", View::class.java, Bundle::class.java) {
-            // 鎖定聊天室 Fragment
             if (it.thisObject::class.java.name.contains("WidgetChatList")) {
                 val view = it.args[0] as View
                 val recyclerId = Utils.getResId("chat_list_recycler_view", "id")
@@ -50,36 +50,94 @@ class Main : Plugin() {
                 if (recyclerId != 0) {
                     val recycler = view.findViewById<RecyclerView>(recyclerId)
                     if (recycler != null) {
-                        // 1. 抓取目標 Manager
-                        targetLayoutManager = recycler.layoutManager as? LinearLayoutManager
+                        chatRecycler = recycler
                         
-                        // 2. 初始化：立刻關閉吸附
-                        targetLayoutManager?.stackFromEnd = false
+                        // 1. 取得原本的 LayoutManager 參數
+                        val oldManager = recycler.layoutManager as? LinearLayoutManager
+                        val orientation = oldManager?.orientation ?: LinearLayoutManager.VERTICAL
+                        val reverseLayout = oldManager?.reverseLayout ?: false
+                        
+                        // 2. 建立我們的「特洛伊木馬」Manager
+                        // 這是繼承自 LinearLayoutManager 的匿名類別
+                        val safeManager = object : LinearLayoutManager(view.context, orientation, reverseLayout) {
+                            
+                            // 覆寫：平滑捲動
+                            override fun smoothScrollToPosition(recyclerView: RecyclerView?, state: RecyclerView.State?, position: Int) {
+                                if (isManualJumping) {
+                                    super.smoothScrollToPosition(recyclerView, state, position)
+                                } else {
+                                    // 什麼都不做，直接忽略 Discord 的捲動請求
+                                }
+                            }
+
+                            // 覆寫：瞬間捲動
+                            override fun scrollToPosition(position: Int) {
+                                if (isManualJumping) {
+                                    super.scrollToPosition(position)
+                                } else {
+                                    // 忽略
+                                }
+                            }
+
+                            // 覆寫：帶偏移量的捲動
+                            override fun scrollToPositionWithOffset(position: Int, offset: Int) {
+                                if (isManualJumping) {
+                                    super.scrollToPositionWithOffset(position, offset)
+                                } else {
+                                    // 忽略
+                                }
+                            }
+
+                            // 覆寫：自動置底設定
+                            override fun setStackFromEnd(stackFromEnd: Boolean) {
+                                if (isManualJumping) {
+                                    super.setStackFromEnd(stackFromEnd)
+                                } else {
+                                    // 強制設為 false，不管 Discord 傳什麼進來
+                                    super.setStackFromEnd(false)
+                                }
+                            }
+                            
+                            // 當佈局完成時，確保不會自動開啟
+                            override fun onLayoutChildren(recycler: RecyclerView.Recycler?, state: RecyclerView.State?) {
+                                if (!isManualJumping) {
+                                    this.stackFromEnd = false
+                                }
+                                super.onLayoutChildren(recycler, state)
+                            }
+                        }
+                        
+                        // 3. 把特洛伊木馬安裝上去
+                        safeManager.stackFromEnd = false // 預設關閉
+                        recycler.layoutManager = safeManager
                     }
                 }
 
-                // 3. 綁定按鈕 (手動跳轉)
+                // 4. 綁定按鈕 (手動跳轉邏輯)
                 val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
                 if (scrollBtnId != 0) {
                     val scrollBtn = view.findViewById<View>(scrollBtnId)
                     scrollBtn?.setOnTouchListener { _, event ->
                         if (event.action == MotionEvent.ACTION_DOWN) {
-                            // 當按下按鈕：允許吸附，並執行跳轉
+                            // 開啟綠燈
                             isManualJumping = true
                             
-                            targetLayoutManager?.let { lm ->
-                                lm.stackFromEnd = true // 開啟吸附，這樣才能跳到底
+                            // 拿到我們的木馬 Manager
+                            val manager = chatRecycler?.layoutManager as? LinearLayoutManager
+                            if (manager != null) {
+                                // 因為是在內部判斷 isManualJumping，所以這裡呼叫 super 的方法會生效
+                                manager.stackFromEnd = true 
                                 
                                 // 強制捲動
-                                val count = lm.itemCount
+                                val count = manager.itemCount
                                 if (count > 0) {
-                                    lm.scrollToPosition(count - 1)
+                                    manager.scrollToPosition(count - 1)
                                 }
                                 
-                                // 1秒後自動恢復鎖定狀態
+                                // 1秒後自動關閉綠燈
                                 Utils.mainThread.postDelayed({
                                     isManualJumping = false
-                                    lm.stackFromEnd = false // 恢復鎖定
+                                    manager.stackFromEnd = false
                                 }, 1000)
                             }
                         }
@@ -90,49 +148,7 @@ class Main : Plugin() {
         }
 
         // ==========================================
-        //  功能 2: 底層佈局劫持 (Layout Hijack)
-        // ==========================================
-        
-        // 【核心大招】：Hook onLayoutChildren
-        // 這是 RecyclerView 決定要把東西放在哪裡的函式。
-        // 每次有新訊息、或者畫面重繪，這個函式都會跑一次。
-        // 我們在這裡強制把 stackFromEnd 改成 false。
-        
-        patcher.before<LinearLayoutManager>(
-            "onLayoutChildren",
-            RecyclerView.Recycler::class.java,
-            RecyclerView.State::class.java
-        ) {
-            val manager = it.thisObject as LinearLayoutManager
-            
-            // 檢查：這是不是聊天室的 Manager？
-            if (manager === targetLayoutManager) {
-                // 如果不是手動跳轉狀態，強制關閉 StackFromEnd
-                if (!isManualJumping) {
-                    // 即使 Discord 剛剛把它設為 true，我們在佈局發生的前一刻把它改回 false
-                    // 這樣佈局出來的結果就是「不自動吸附」
-                    manager.stackFromEnd = false
-                }
-            }
-        }
-
-        // 雙重保險：攔截 setStackFromEnd
-        // 防止 Discord 在其他地方偷偷設定
-        patcher.before<LinearLayoutManager>(
-            "setStackFromEnd",
-            Boolean::class.javaPrimitiveType!!
-        ) {
-            if (it.thisObject === targetLayoutManager) {
-                if (!isManualJumping) {
-                    // 強制竄改參數為 false
-                    it.args[0] = false
-                }
-            }
-        }
-
-
-        // ==========================================
-        //  功能 3: 複製按鈕 (保持不變)
+        //  功能 2: 複製按鈕 (保持不變)
         // ==========================================
         
         val btnSize = DimenUtils.dpToPx(40)
