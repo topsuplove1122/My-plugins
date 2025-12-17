@@ -23,7 +23,7 @@ import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
 
 import com.lytefast.flexinput.R
-import java.lang.reflect.Field // 引入反射
+import java.lang.reflect.Field
 
 @AliucordPlugin(requiresRestart = true)
 class Main : Plugin() {
@@ -33,15 +33,11 @@ class Main : Plugin() {
     // 是否正在手動跳轉
     private var isManualJumping = false
     
-    // 反射欄位緩存
-    private var stackFromEndField: Field? = null
-    private var pendingScrollPositionField: Field? = null
+    // 用來儲存反射到的欄位 (Field)
+    private var fieldStackFromEnd: Field? = null
+    private var fieldPendingScrollPosition: Field? = null
 
     override fun start(ctx: Context) {
-        
-        // ==========================================
-        //  功能 1: 記憶體層級鎖定 (Memory Field Lock)
-        // ==========================================
         
         patcher.after<Fragment>("onViewCreated", View::class.java, Bundle::class.java) {
             if (it.thisObject::class.java.name.contains("WidgetChatList")) {
@@ -52,54 +48,32 @@ class Main : Plugin() {
                     val recycler = view.findViewById<RecyclerView>(recyclerId)
                     if (recycler != null) {
                         
-                        // 1. 準備反射工具
-                        // 我們要找的是 LinearLayoutManager 的私有變數
+                        // 1. 初始化反射欄位 (只做一次)
+                        initReflection(recycler)
+
+                        // 2. 初始鎖定
                         val lm = recycler.layoutManager as? LinearLayoutManager
-                        if (lm != null) {
-                            try {
-                                // 獲取 mStackFromEnd 欄位
-                                // 注意：在混淆過的 APK 中，變數名稱可能不是 mStackFromEnd
-                                // 但因為你是用 126.21 且看到了 Smali，我們假設它是標準的 AndroidX 庫
-                                // 通常 AndroidX 庫在 Aliucord 環境下名稱是保留的
-                                var clazz: Class<*>? = lm::class.java
-                                while (clazz != null) {
-                                    try {
-                                        stackFromEndField = clazz.getDeclaredField("mStackFromEnd")
-                                        stackFromEndField?.isAccessible = true
-                                        
-                                        pendingScrollPositionField = clazz.getDeclaredField("mPendingScrollPosition")
-                                        pendingScrollPositionField?.isAccessible = true
-                                        break
-                                    } catch (e: NoSuchFieldException) {
-                                        // 如果在當前類別找不到，往父類別找
-                                        clazz = clazz.superclass
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                // 反射失敗 (可能被混淆了)
-                            }
+                        if (lm != null) forceLock(lm)
 
-                            // 2. 初始化：強制修改記憶體中的值為 false
-                            forceLock(lm)
-
-                            // 3. 監聽佈局變更 (這是最頻繁觸發的地方)
-                            // 每當 Discord 試圖捲動，它會觸發 requestLayout，我們就在這裡攔截
-                            recycler.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                                if (!isManualJumping) {
-                                    forceLock(lm)
-                                }
+                        // 3. 【核心邏輯】監聽佈局變更
+                        // 只要 Discord 試圖更新畫面 (Layout)，我們就強制檢查並重置變數
+                        // 這比 Hook 函式更底層，因為它發生在畫面繪製的前一刻
+                        recycler.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                            if (!isManualJumping && lm != null) {
+                                forceLock(lm)
                             }
-                            
-                            // 4. 監聽滑動，確保手動滑動時鎖定
-                            recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-                                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
-                                    if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
-                                        isManualJumping = false
-                                        forceLock(lm)
-                                    }
-                                }
-                            })
                         }
+                        
+                        // 4. 監聽滑動狀態
+                        recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                                // 當手指拖曳時，視為手動操作結束，立刻鎖定
+                                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                                    isManualJumping = false
+                                    if (lm != null) forceLock(lm)
+                                }
+                            }
+                        })
                     }
                 }
 
@@ -109,7 +83,6 @@ class Main : Plugin() {
                     val scrollBtn = view.findViewById<View>(scrollBtnId)
                     scrollBtn?.setOnTouchListener { _, event ->
                         if (event.action == MotionEvent.ACTION_DOWN) {
-                            // 開啟綠燈
                             isManualJumping = true
                             
                             val recycler = view.findViewById<RecyclerView>(recyclerId)
@@ -118,7 +91,7 @@ class Main : Plugin() {
                             if (manager != null) {
                                 // 手動修改記憶體，允許吸附
                                 try {
-                                    stackFromEndField?.setBoolean(manager, true)
+                                    fieldStackFromEnd?.setBoolean(manager, true)
                                     // 執行跳轉
                                     if (manager.itemCount > 0) {
                                         manager.scrollToPosition(manager.itemCount - 1)
@@ -135,22 +108,46 @@ class Main : Plugin() {
         setupCopyButtons(ctx)
     }
 
-    // 強制鎖定函式
+    // 初始化反射：找到 mStackFromEnd 和 mPendingScrollPosition
+    private fun initReflection(recycler: RecyclerView) {
+        val lm = recycler.layoutManager ?: return
+        var clazz: Class<*>? = lm::class.java
+        
+        // 往上層找，直到找到 LinearLayoutManager 定義變數的地方
+        while (clazz != null && fieldStackFromEnd == null) {
+            try {
+                // 嘗試獲取變數，名稱來自你提供的 Smali
+                val f1 = clazz.getDeclaredField("mStackFromEnd")
+                f1.isAccessible = true
+                fieldStackFromEnd = f1
+                
+                val f2 = clazz.getDeclaredField("mPendingScrollPosition")
+                f2.isAccessible = true
+                fieldPendingScrollPosition = f2
+                
+            } catch (e: Exception) {
+                clazz = clazz.superclass
+            }
+        }
+    }
+
+    // 強制鎖定：把變數改回不會捲動的狀態
     private fun forceLock(lm: LinearLayoutManager) {
         try {
-            // 1. 強制把 mStackFromEnd 改成 false
-            stackFromEndField?.setBoolean(lm, false)
+            // 1. 強制 mStackFromEnd = false
+            // 這對應 Smali 中的: iput-boolean v0, p0, ... mStackFromEnd:Z
+            fieldStackFromEnd?.setBoolean(lm, false)
             
-            // 2. 強制把 mPendingScrollPosition 改成 -1 (NO_POSITION)
-            // 這樣就算它呼叫了 requestLayout，LayoutManager 也會發現「沒有待辦事項」
-            val currentPending = pendingScrollPositionField?.getInt(lm) ?: -1
+            // 2. 強制 mPendingScrollPosition = -1
+            // 這對應 Smali 中的: iput p1, p0, ... mPendingScrollPosition:I
+            // 只要這個值是 -1，requestLayout 就不會觸發跳轉
+            val currentPending = fieldPendingScrollPosition?.getInt(lm) ?: -1
             if (currentPending != -1) {
-                pendingScrollPositionField?.setInt(lm, -1)
+                fieldPendingScrollPosition?.setInt(lm, -1)
             }
         } catch (e: Exception) {
-            // 如果變數名稱被混淆導致找不到，這裡可以用 LayoutManager 的公開方法當備案
-            // 但公開方法 setStackFromEnd 可能會觸發 requestLayout，反射修改是最乾淨的
-            lm.stackFromEnd = false
+            // 如果反射失敗，嘗試用公開方法 (雖然可能觸發 requestLayout 導致迴圈，但在 onLayoutChangeListener 裡通常沒事)
+            if (lm.stackFromEnd) lm.stackFromEnd = false
         }
     }
 
