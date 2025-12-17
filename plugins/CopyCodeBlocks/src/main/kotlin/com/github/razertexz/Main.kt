@@ -1,10 +1,11 @@
-package com.github.razertexz
+package com.github.razertexz // 記得確認這行跟你的資料夾結構一致
 
 import androidx.constraintlayout.widget.ConstraintLayout
 import android.content.Context
 import android.widget.ImageView
 import android.view.View
-import android.graphics.Color // 引入顏色庫
+import android.graphics.Color
+import androidx.recyclerview.widget.RecyclerView // 確保有這行
 
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -17,42 +18,44 @@ import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
 
 import com.lytefast.flexinput.R
-import androidx.recyclerview.widget.RecyclerView
 
 @AliucordPlugin(requiresRestart = true)
 class Main : Plugin() {
     private val COPY_BTN_ID = 999888777 // 隨意設定一個 ID
 
     override fun start(ctx: Context) {
-        // 加大一點按鈕尺寸，讓它更明顯
+        // 加大一點按鈕尺寸
         val copyBtnSize = DimenUtils.defaultPadding + 10 
         val copyBtnMargin = DimenUtils.defaultPadding / 4
 
-        val copyIcon = ctx.getDrawable(R.e.ic_copy_24dp)!!.mutate()
-        
-        // 【設定顏色】：這裡設為亮青色 (Cyan)，在深色模式下超級明顯
-        // 如果想要紅色，改成 Color.RED；想要白色，改成 Color.WHITE
-        copyIcon.setTint(Color.CYAN) 
+        // 取得圖示並設定顏色
+        // 加上 ? 防止資源找不到時崩潰
+        val copyIcon = ctx.getDrawable(R.e.ic_copy_24dp)?.mutate()
+        copyIcon?.setTint(Color.CYAN) 
 
-        patcher.after<WidgetChatListAdapterItemMessage>("processMessageText", SimpleDraweeSpanTextView::class.java, MessageEntry::class.java) {
+        patcher.after<WidgetChatListAdapterItemMessage>(
+            "processMessageText", 
+            SimpleDraweeSpanTextView::class.java, 
+            MessageEntry::class.java
+        ) {
             val textView = it.args[0] as SimpleDraweeSpanTextView
             val messageEntry = it.args[1] as MessageEntry
+            
+            // 1. 取得 ViewHolder
             val holder = it.thisObject as RecyclerView.ViewHolder
-            val view = holder.itemView
+            
+            // 【關鍵修正】：定義 root 變數，並強制轉型為 ConstraintLayout
+            // 這樣下面才能用 root.findViewById 和 root.addView
+            val root = holder.itemView as ConstraintLayout
 
             var copyBtn = root.findViewById<ImageView>(COPY_BTN_ID)
 
             if (copyBtn == null) {
                 copyBtn = ImageView(root.context).apply {
                     id = COPY_BTN_ID
-                    setImageDrawable(copyIcon)
+                    if (copyIcon != null) setImageDrawable(copyIcon)
                     
-                    // 【關鍵修改】：移除了 alpha 設定，現在是 100% 不透明
-                    // alpha = 0.6f  <-- 這行刪掉了
-                    
-                    // 設定背景色 (可選)：如果你想要按鈕後面有個黑色底框，把下面這行註解打開
-                    // setBackgroundColor(Color.parseColor("#88000000")) 
-
+                    // 設定 LayoutParams，讓它顯示在文字旁邊
                     layoutParams = ConstraintLayout.LayoutParams(copyBtnSize, copyBtnSize).apply {
                         topToTop = textView.id
                         endToEnd = textView.id
@@ -60,9 +63,9 @@ class Main : Plugin() {
                         rightMargin = copyBtnMargin
                     }
                     
-                    // 增加一點 padding 讓圖示在按鈕框框內置中，不會貼邊
                     setPadding(5, 5, 5, 5)
                 }
+                // 現在 root 已經定義好了，這行就不會報錯了
                 root.addView(copyBtn)
             }
 
