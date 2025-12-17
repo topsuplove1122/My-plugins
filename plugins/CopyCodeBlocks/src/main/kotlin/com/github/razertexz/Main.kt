@@ -4,7 +4,7 @@ import androidx.constraintlayout.widget.ConstraintLayout
 import android.content.Context
 import android.widget.ImageView
 import android.view.View
-import android.view.MotionEvent // 用來監聽觸控
+import android.view.MotionEvent
 import android.graphics.Color
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -13,6 +13,8 @@ import android.view.ViewGroup
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.*
+// 【關鍵修正】明確導入 PreHookParam，解決 Unresolved reference 錯誤
+import com.aliucord.patcher.PreHookParam 
 import com.aliucord.Utils
 import com.aliucord.utils.DimenUtils
 
@@ -20,7 +22,7 @@ import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
-import com.discord.widgets.chat.list.WidgetChatList // 聊天室主介面
+import com.discord.widgets.chat.list.WidgetChatList
 
 import com.lytefast.flexinput.R
 
@@ -29,33 +31,25 @@ class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
     
-    // 【通行證變數】記錄最後一次按下「跳到底部」的時間
+    // 通行證時間戳記
     private var lastJumpRequestTime = 0L
 
     override fun start(ctx: Context) {
         // ==========================================
-        //  功能 0: 監聽「跳到底部」按鈕 (發放通行證)
+        //  功能 0: 監聽「跳到底部」按鈕
         // ==========================================
         
-        // 這是 Discord 聊天室介面建立時的方法
         patcher.after<WidgetChatList>("onViewCreated", View::class.java, android.os.Bundle::class.java) {
-            val fragment = it.thisObject as WidgetChatList
             val view = it.args[0] as View
-            
-            // 嘗試找到 Discord原本的「跳到底部」按鈕
-            // 這個 ID 通常是 chat_list_scroll_to_bottom
             val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
             
             if (scrollBtnId != 0) {
                 val scrollBtn = view.findViewById<View>(scrollBtnId)
                 if (scrollBtn != null) {
-                    // 加上觸控監聽：當手指按下按鈕時，更新通行證時間
                     scrollBtn.setOnTouchListener { _, event ->
                         if (event.action == MotionEvent.ACTION_DOWN) {
-                            // 發放通行證！(更新時間戳記)
                             lastJumpRequestTime = System.currentTimeMillis()
                         }
-                        // 回傳 false 代表「我不攔截這個事件」，讓它繼續傳給原本的 onClick 邏輯
                         false 
                     }
                 }
@@ -68,35 +62,34 @@ class Main : Plugin() {
         
         val chatAdapterClass = WidgetChatListAdapter::class.java
 
-        val blockScroll = { it: PreHookParam ->
+        // 定義攔截邏輯，並明確指定型別為 PreHookParam
+        val blockScroll = { param: PreHookParam ->
             try {
-                // 檢查是否擁有通行證 (距離上次按按鈕是否在 1.5 秒內)
+                // 1.5 秒通行證
                 val isAllowed = (System.currentTimeMillis() - lastJumpRequestTime) < 1500
 
                 if (!isAllowed) {
-                    val adapter = (it.thisObject as RecyclerView).adapter
-                    // 只有在「沒有通行證」且「是聊天室」的時候才攔截
+                    val adapter = (param.thisObject as RecyclerView).adapter
                     if (adapter != null && adapter::class.java == chatAdapterClass) {
-                        it.result = null
+                        param.result = null
                     }
                 }
             } catch (e: Exception) {}
         }
 
-        // 1. 攔截瞬間跳轉
+        // 1. 攔截 scrollToPosition
         patcher.before<RecyclerView>(
             "scrollToPosition", 
             Int::class.javaPrimitiveType!! 
         ) { blockScroll(it) }
 
-        // 2. 攔截平滑捲動 (Discord 跳到底部按鈕、新訊息主要用這個)
+        // 2. 攔截 smoothScrollToPosition
         patcher.before<RecyclerView>(
             "smoothScrollToPosition", 
             Int::class.javaPrimitiveType!! 
         ) { blockScroll(it) }
 
-        // 3. 攔截 LayoutManager 的捲動
-        // 這裡我們也加上同樣的邏輯：如果剛按了按鈕，就允許 LayoutManager 捲動
+        // 3. 攔截 LinearLayoutManager
         patcher.before<LinearLayoutManager>(
             "scrollToPositionWithOffset",
             Int::class.javaPrimitiveType!!,
@@ -105,9 +98,7 @@ class Main : Plugin() {
              try {
                 val isAllowed = (System.currentTimeMillis() - lastJumpRequestTime) < 1500
                 if (!isAllowed) {
-                     // 這裡比較難判斷 adapter，所以我們採取保守策略：
-                     // 如果沒有按按鈕，我們就不讓 LayoutManager 做這個操作
-                     // (注意：如果這導致副作用，可以把這裡註解掉)
+                     // 保守策略，暫不攔截 LayoutManager 以免副作用，若有需要可取消註解
                      // it.result = null 
                 }
              } catch (e: Exception) {}
@@ -115,7 +106,7 @@ class Main : Plugin() {
 
 
         // ==========================================
-        //  功能 2: 複製按鈕 (Copy Buttons) - 保持原樣
+        //  功能 2: 複製按鈕 (Copy Buttons)
         // ==========================================
         
         val btnSize = DimenUtils.dpToPx(40)
