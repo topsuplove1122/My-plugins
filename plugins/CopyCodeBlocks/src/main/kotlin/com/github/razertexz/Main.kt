@@ -13,8 +13,7 @@ import android.view.ViewGroup
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.*
-// 【關鍵修正】明確導入 PreHookParam，解決 Unresolved reference 錯誤
-import com.aliucord.patcher.PreHookParam 
+// 移除會報錯的 PreHookParam Import，改用自動推斷
 import com.aliucord.Utils
 import com.aliucord.utils.DimenUtils
 
@@ -31,14 +30,12 @@ class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
     
-    // 通行證時間戳記
     private var lastJumpRequestTime = 0L
 
     override fun start(ctx: Context) {
         // ==========================================
         //  功能 0: 監聽「跳到底部」按鈕
         // ==========================================
-        
         patcher.after<WidgetChatList>("onViewCreated", View::class.java, android.os.Bundle::class.java) {
             val view = it.args[0] as View
             val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
@@ -62,48 +59,46 @@ class Main : Plugin() {
         
         val chatAdapterClass = WidgetChatListAdapter::class.java
 
-        // 定義攔截邏輯，並明確指定型別為 PreHookParam
-        val blockScroll = { param: PreHookParam ->
-            try {
-                // 1.5 秒通行證
-                val isAllowed = (System.currentTimeMillis() - lastJumpRequestTime) < 1500
-
-                if (!isAllowed) {
-                    val adapter = (param.thisObject as RecyclerView).adapter
-                    if (adapter != null && adapter::class.java == chatAdapterClass) {
-                        param.result = null
-                    }
-                }
-            } catch (e: Exception) {}
-        }
+        // 策略：直接把邏輯複製到各個 Hook 裡面，讓編譯器自動推斷型別
+        // 這樣就不需要 import PreHookParam 了
 
         // 1. 攔截 scrollToPosition
         patcher.before<RecyclerView>(
             "scrollToPosition", 
             Int::class.javaPrimitiveType!! 
-        ) { blockScroll(it) }
+        ) {
+            try {
+                // 檢查通行證 (1.5秒內)
+                val isAllowed = (System.currentTimeMillis() - lastJumpRequestTime) < 1500
+                if (!isAllowed) {
+                    val adapter = (it.thisObject as RecyclerView).adapter
+                    // 確認是聊天室才攔截
+                    if (adapter != null && adapter::class.java == chatAdapterClass) {
+                        it.result = null // 阻止執行
+                    }
+                }
+            } catch (e: Exception) {}
+        }
 
-        // 2. 攔截 smoothScrollToPosition
+        // 2. 攔截 smoothScrollToPosition (這是 Discord 主要用的)
         patcher.before<RecyclerView>(
             "smoothScrollToPosition", 
             Int::class.javaPrimitiveType!! 
-        ) { blockScroll(it) }
-
-        // 3. 攔截 LinearLayoutManager
-        patcher.before<LinearLayoutManager>(
-            "scrollToPositionWithOffset",
-            Int::class.javaPrimitiveType!!,
-            Int::class.javaPrimitiveType!!
-        ) { 
-             try {
+        ) {
+            try {
                 val isAllowed = (System.currentTimeMillis() - lastJumpRequestTime) < 1500
                 if (!isAllowed) {
-                     // 保守策略，暫不攔截 LayoutManager 以免副作用，若有需要可取消註解
-                     // it.result = null 
+                    val adapter = (it.thisObject as RecyclerView).adapter
+                    if (adapter != null && adapter::class.java == chatAdapterClass) {
+                        it.result = null
+                    }
                 }
-             } catch (e: Exception) {}
+            } catch (e: Exception) {}
         }
 
+        // 3. 攔截 LinearLayoutManager (選用)
+        // 為了避免複雜度導致編譯錯誤，我們先只攔截上面兩個。
+        // 通常攔截 RecyclerView 本身就足夠了。
 
         // ==========================================
         //  功能 2: 複製按鈕 (Copy Buttons)
