@@ -7,7 +7,6 @@ import android.view.MotionEvent
 import android.graphics.Color
 import android.os.Bundle
 
-// 引入 RecyclerView 相關類別
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.constraintlayout.widget.ConstraintLayout
@@ -24,22 +23,24 @@ import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
 
 import com.lytefast.flexinput.R
+import java.lang.reflect.Field // 引入反射
 
 @AliucordPlugin(requiresRestart = true)
 class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
     
-    // 標記：是否正在執行手動跳轉
+    // 是否正在手動跳轉
     private var isManualJumping = false
     
-    // 用來儲存被我們替換掉的 RecyclerView，方便後續存取
-    private var chatRecycler: RecyclerView? = null
+    // 反射欄位緩存
+    private var stackFromEndField: Field? = null
+    private var pendingScrollPositionField: Field? = null
 
     override fun start(ctx: Context) {
         
         // ==========================================
-        //  功能 1: 替換 LayoutManager (特洛伊木馬)
+        //  功能 1: 記憶體層級鎖定 (Memory Field Lock)
         // ==========================================
         
         patcher.after<Fragment>("onViewCreated", View::class.java, Bundle::class.java) {
@@ -50,70 +51,59 @@ class Main : Plugin() {
                 if (recyclerId != 0) {
                     val recycler = view.findViewById<RecyclerView>(recyclerId)
                     if (recycler != null) {
-                        chatRecycler = recycler
                         
-                        // 1. 取得原本的 LayoutManager 參數
-                        val oldManager = recycler.layoutManager as? LinearLayoutManager
-                        val orientation = oldManager?.orientation ?: LinearLayoutManager.VERTICAL
-                        val reverseLayout = oldManager?.reverseLayout ?: false
-                        
-                        // 2. 建立我們的「特洛伊木馬」Manager
-                        // 這是繼承自 LinearLayoutManager 的匿名類別
-                        val safeManager = object : LinearLayoutManager(view.context, orientation, reverseLayout) {
-                            
-                            // 覆寫：平滑捲動
-                            override fun smoothScrollToPosition(recyclerView: RecyclerView?, state: RecyclerView.State?, position: Int) {
-                                if (isManualJumping) {
-                                    super.smoothScrollToPosition(recyclerView, state, position)
-                                } else {
-                                    // 什麼都不做，直接忽略 Discord 的捲動請求
+                        // 1. 準備反射工具
+                        // 我們要找的是 LinearLayoutManager 的私有變數
+                        val lm = recycler.layoutManager as? LinearLayoutManager
+                        if (lm != null) {
+                            try {
+                                // 獲取 mStackFromEnd 欄位
+                                // 注意：在混淆過的 APK 中，變數名稱可能不是 mStackFromEnd
+                                // 但因為你是用 126.21 且看到了 Smali，我們假設它是標準的 AndroidX 庫
+                                // 通常 AndroidX 庫在 Aliucord 環境下名稱是保留的
+                                var clazz: Class<*>? = lm::class.java
+                                while (clazz != null) {
+                                    try {
+                                        stackFromEndField = clazz.getDeclaredField("mStackFromEnd")
+                                        stackFromEndField?.isAccessible = true
+                                        
+                                        pendingScrollPositionField = clazz.getDeclaredField("mPendingScrollPosition")
+                                        pendingScrollPositionField?.isAccessible = true
+                                        break
+                                    } catch (e: NoSuchFieldException) {
+                                        // 如果在當前類別找不到，往父類別找
+                                        clazz = clazz.superclass
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                // 反射失敗 (可能被混淆了)
                             }
 
-                            // 覆寫：瞬間捲動
-                            override fun scrollToPosition(position: Int) {
-                                if (isManualJumping) {
-                                    super.scrollToPosition(position)
-                                } else {
-                                    // 忽略
-                                }
-                            }
+                            // 2. 初始化：強制修改記憶體中的值為 false
+                            forceLock(lm)
 
-                            // 覆寫：帶偏移量的捲動
-                            override fun scrollToPositionWithOffset(position: Int, offset: Int) {
-                                if (isManualJumping) {
-                                    super.scrollToPositionWithOffset(position, offset)
-                                } else {
-                                    // 忽略
-                                }
-                            }
-
-                            // 覆寫：自動置底設定
-                            override fun setStackFromEnd(stackFromEnd: Boolean) {
-                                if (isManualJumping) {
-                                    super.setStackFromEnd(stackFromEnd)
-                                } else {
-                                    // 強制設為 false，不管 Discord 傳什麼進來
-                                    super.setStackFromEnd(false)
-                                }
-                            }
-                            
-                            // 當佈局完成時，確保不會自動開啟
-                            override fun onLayoutChildren(recycler: RecyclerView.Recycler?, state: RecyclerView.State?) {
+                            // 3. 監聽佈局變更 (這是最頻繁觸發的地方)
+                            // 每當 Discord 試圖捲動，它會觸發 requestLayout，我們就在這裡攔截
+                            recycler.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                                 if (!isManualJumping) {
-                                    this.stackFromEnd = false
+                                    forceLock(lm)
                                 }
-                                super.onLayoutChildren(recycler, state)
                             }
+                            
+                            // 4. 監聽滑動，確保手動滑動時鎖定
+                            recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                                    if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                                        isManualJumping = false
+                                        forceLock(lm)
+                                    }
+                                }
+                            })
                         }
-                        
-                        // 3. 把特洛伊木馬安裝上去
-                        safeManager.stackFromEnd = false // 預設關閉
-                        recycler.layoutManager = safeManager
                     }
                 }
 
-                // 4. 綁定按鈕 (手動跳轉邏輯)
+                // 5. 綁定按鈕 (手動跳轉)
                 val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
                 if (scrollBtnId != 0) {
                     val scrollBtn = view.findViewById<View>(scrollBtnId)
@@ -122,23 +112,18 @@ class Main : Plugin() {
                             // 開啟綠燈
                             isManualJumping = true
                             
-                            // 拿到我們的木馬 Manager
-                            val manager = chatRecycler?.layoutManager as? LinearLayoutManager
+                            val recycler = view.findViewById<RecyclerView>(recyclerId)
+                            val manager = recycler?.layoutManager as? LinearLayoutManager
+                            
                             if (manager != null) {
-                                // 因為是在內部判斷 isManualJumping，所以這裡呼叫 super 的方法會生效
-                                manager.stackFromEnd = true 
-                                
-                                // 強制捲動
-                                val count = manager.itemCount
-                                if (count > 0) {
-                                    manager.scrollToPosition(count - 1)
-                                }
-                                
-                                // 1秒後自動關閉綠燈
-                                Utils.mainThread.postDelayed({
-                                    isManualJumping = false
-                                    manager.stackFromEnd = false
-                                }, 1000)
+                                // 手動修改記憶體，允許吸附
+                                try {
+                                    stackFromEndField?.setBoolean(manager, true)
+                                    // 執行跳轉
+                                    if (manager.itemCount > 0) {
+                                        manager.scrollToPosition(manager.itemCount - 1)
+                                    }
+                                } catch (e: Exception) {}
                             }
                         }
                         false 
@@ -146,11 +131,30 @@ class Main : Plugin() {
                 }
             }
         }
-
-        // ==========================================
-        //  功能 2: 複製按鈕 (保持不變)
-        // ==========================================
         
+        setupCopyButtons(ctx)
+    }
+
+    // 強制鎖定函式
+    private fun forceLock(lm: LinearLayoutManager) {
+        try {
+            // 1. 強制把 mStackFromEnd 改成 false
+            stackFromEndField?.setBoolean(lm, false)
+            
+            // 2. 強制把 mPendingScrollPosition 改成 -1 (NO_POSITION)
+            // 這樣就算它呼叫了 requestLayout，LayoutManager 也會發現「沒有待辦事項」
+            val currentPending = pendingScrollPositionField?.getInt(lm) ?: -1
+            if (currentPending != -1) {
+                pendingScrollPositionField?.setInt(lm, -1)
+            }
+        } catch (e: Exception) {
+            // 如果變數名稱被混淆導致找不到，這裡可以用 LayoutManager 的公開方法當備案
+            // 但公開方法 setStackFromEnd 可能會觸發 requestLayout，反射修改是最乾淨的
+            lm.stackFromEnd = false
+        }
+    }
+
+    private fun setupCopyButtons(ctx: Context) {
         val btnSize = DimenUtils.dpToPx(40)
         val btnPadding = DimenUtils.dpToPx(8)
         val btnTopMargin = DimenUtils.dpToPx(-5) 
@@ -171,7 +175,6 @@ class Main : Plugin() {
             val holder = it.thisObject as RecyclerView.ViewHolder
             val root = holder.itemView as ConstraintLayout
 
-            // --- 藍色按鈕 ---
             var btnText = root.findViewById<ImageView>(ID_BTN_COPY_TEXT)
             if (btnText == null) {
                 btnText = ImageView(root.context).apply {
@@ -196,7 +199,6 @@ class Main : Plugin() {
                 Utils.showToast("已複製文字！")
             }
 
-            // --- 紅色按鈕 ---
             var targetUrl: String? = null
             val embeds = messageEntry.message.embeds
             if (embeds.isNotEmpty()) {
