@@ -54,3 +54,9 @@ jobs:
       #     git add .
       #     git commit -m "Build $GITHUB_SHA" || exit 0
       #     git push
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: My-Aliucord-Plugins  # 下載時壓縮檔的名字
+          path: builds/*.zip
