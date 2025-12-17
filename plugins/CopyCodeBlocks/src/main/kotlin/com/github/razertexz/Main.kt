@@ -7,6 +7,8 @@ import android.view.MotionEvent
 import android.graphics.Color
 import android.os.Bundle
 
+// 【關鍵修正】補回遺失的 ConstraintLayout Import
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.fragment.app.Fragment 
@@ -42,9 +44,6 @@ class Main : Plugin() {
         //  功能 1: 視角錨定 (Scroll Anchoring)
         // ==========================================
         
-        // 我們 Hook 佈局發生的那一刻：onLayoutChildren
-        // 這是 RecyclerView 決定把東西擺在哪裡的關鍵時刻
-        
         // 1. 佈局前 (Before)：記住我現在在哪裡
         patcher.before<LinearLayoutManager>(
             "onLayoutChildren",
@@ -59,17 +58,13 @@ class Main : Plugin() {
                 return@before
             }
 
-            // 檢查我們是否在「底部」
-            // 如果還能往下滑 (canScrollVertically(1) == true)，代表我們在看歷史訊息
-            // 這時候就要開啟「錨定模式」
             try {
-                // 有時候剛初始化，View 還是空的，要 catch 錯誤
                 val firstPos = manager.findFirstVisibleItemPosition()
                 val lastPos = manager.findLastVisibleItemPosition()
                 val itemCount = manager.itemCount
                 
-                // 邏輯：如果最後一個看到的訊息，不是總訊息數的最後一個
-                // 代表我還沒看完，我正在往上滑
+                // 邏輯：如果還沒到底部 (最後一個看到的 item 不是總數的最後一個)
+                // 代表使用者正在閱讀舊訊息，開啟錨定保護
                 if (lastPos < itemCount - 1 && firstPos != -1) {
                     shouldRestore = true
                     
@@ -77,11 +72,10 @@ class Main : Plugin() {
                     anchorIndex = firstPos
                     
                     // 記住這則訊息距離頂部多少像素 (Offset)
-                    // 這樣恢復時才會精準，不會跳一下
                     val view = manager.findViewByPosition(firstPos)
                     anchorOffset = view?.top ?: 0
                 } else {
-                    // 我在最底部，不需要錨定，隨便 Discord 更新
+                    // 在最底部，隨便它動
                     shouldRestore = false
                 }
             } catch (e: Exception) {
@@ -99,11 +93,9 @@ class Main : Plugin() {
             
             if (shouldRestore && anchorIndex != -1) {
                 // 強制跳轉回剛剛記住的位置
-                // 這裡用 scrollToPositionWithOffset 是最穩的，因為它包含像素偏移
                 manager.scrollToPositionWithOffset(anchorIndex, anchorOffset)
                 
-                // 重置狀態，避免無限迴圈 (雖然在 onLayoutChildren 裡呼叫 scroll 有點危險，但在 After 應該沒事)
-                // 為了保險，我們只執行一次
+                // 重置狀態
                 shouldRestore = false 
             }
         }
@@ -121,22 +113,15 @@ class Main : Plugin() {
                     val scrollBtn = view.findViewById<View>(scrollBtnId)
                     scrollBtn?.setOnTouchListener { _, event ->
                         if (event.action == MotionEvent.ACTION_DOWN) {
-                            // 1. 宣告現在是手動操作
                             isManualJumping = true
-                            shouldRestore = false // 關閉防護罩
+                            shouldRestore = false 
                             
-                            // 2. 執行跳轉
                             val recycler = view.findViewById<RecyclerView>(recyclerId)
                             val manager = recycler?.layoutManager as? LinearLayoutManager
-                            if (manager != null) {
-                                // 為了確保能跳下去，我們甚至可以暫時開啟 stackFromEnd
-                                // manager.stackFromEnd = true 
-                                if (manager.itemCount > 0) {
-                                    manager.scrollToPosition(manager.itemCount - 1)
-                                }
+                            if (manager != null && manager.itemCount > 0) {
+                                manager.scrollToPosition(manager.itemCount - 1)
                             }
                             
-                            // 3. 一秒後解除手動模式 (恢復保護)
                             Utils.mainThread.postDelayed({
                                 isManualJumping = false
                             }, 1000)
