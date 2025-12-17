@@ -5,7 +5,6 @@ import android.widget.ImageView
 import android.view.View
 import android.view.MotionEvent
 import android.graphics.Color
-import android.view.ViewGroup
 import android.os.Bundle
 
 import androidx.recyclerview.widget.RecyclerView
@@ -30,70 +29,58 @@ class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
     
-    // 標記：是否正在執行「跳到底部」的操作
-    private var isJumping = false
+    // 標記：是否正在執行手動跳轉
+    private var isManualJumping = false
+    
+    // 用來儲存聊天室的 LayoutManager 實例，避免誤殺其他列表
+    private var targetLayoutManager: LinearLayoutManager? = null
 
     override fun start(ctx: Context) {
         
         // ==========================================
-        //  功能 1: 狀態強制修正 (State Enforcer)
+        //  功能 1: 鎖定目標 & 按鈕監聽
         // ==========================================
         
         patcher.after<Fragment>("onViewCreated", View::class.java, Bundle::class.java) {
+            // 鎖定聊天室 Fragment
             if (it.thisObject::class.java.name.contains("WidgetChatList")) {
                 val view = it.args[0] as View
-                
                 val recyclerId = Utils.getResId("chat_list_recycler_view", "id")
+                
                 if (recyclerId != 0) {
                     val recycler = view.findViewById<RecyclerView>(recyclerId)
                     if (recycler != null) {
+                        // 1. 抓取目標 Manager
+                        targetLayoutManager = recycler.layoutManager as? LinearLayoutManager
                         
-                        // 1. 初始化時先關閉
-                        val manager = recycler.layoutManager as? LinearLayoutManager
-                        manager?.stackFromEnd = false
-
-                        // 2. 【核心大招】監聽佈局變更
-                        // 每當有新訊息進來，RecyclerView 會重新佈局 (Layout)
-                        // 我們就在這一瞬間，檢查 stackFromEnd，如果是 true 且沒在跳轉，就強制關掉！
-                        recycler.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                            if (!isJumping) {
-                                val lm = recycler.layoutManager as? LinearLayoutManager
-                                // 只要發現它被偷偷改成 true，立刻改回 false
-                                if (lm != null && lm.stackFromEnd) {
-                                    lm.stackFromEnd = false
-                                }
-                            }
-                        }
-
-                        // 3. 監聽使用者滑動
-                        // 只要手指一碰螢幕，就視為停止跳轉，立刻鎖定
-                        recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-                            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
-                                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
-                                    isJumping = false
-                                    (recyclerView.layoutManager as? LinearLayoutManager)?.stackFromEnd = false
-                                }
-                            }
-                        })
+                        // 2. 初始化：立刻關閉吸附
+                        targetLayoutManager?.stackFromEnd = false
                     }
                 }
 
-                // 4. 綁定按鈕
+                // 3. 綁定按鈕 (手動跳轉)
                 val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
                 if (scrollBtnId != 0) {
                     val scrollBtn = view.findViewById<View>(scrollBtnId)
                     scrollBtn?.setOnTouchListener { _, event ->
                         if (event.action == MotionEvent.ACTION_DOWN) {
-                            // 按下按鈕時，允許置底
-                            isJumping = true
+                            // 當按下按鈕：允許吸附，並執行跳轉
+                            isManualJumping = true
                             
-                            val recycler = view.findViewById<RecyclerView>(recyclerId)
-                            val manager = recycler?.layoutManager as? LinearLayoutManager
-                            if (manager != null) {
-                                // 開啟吸附功能
-                                manager.stackFromEnd = true
+                            targetLayoutManager?.let { lm ->
+                                lm.stackFromEnd = true // 開啟吸附，這樣才能跳到底
+                                
                                 // 強制捲動
-                                manager.scrollToPosition(manager.itemCount - 1)
+                                val count = lm.itemCount
+                                if (count > 0) {
+                                    lm.scrollToPosition(count - 1)
+                                }
+                                
+                                // 1秒後自動恢復鎖定狀態
+                                Utils.mainThread.postDelayed({
+                                    isManualJumping = false
+                                    lm.stackFromEnd = false // 恢復鎖定
+                                }, 1000)
                             }
                         }
                         false 
@@ -103,7 +90,49 @@ class Main : Plugin() {
         }
 
         // ==========================================
-        //  功能 2: 複製按鈕 (保持不變)
+        //  功能 2: 底層佈局劫持 (Layout Hijack)
+        // ==========================================
+        
+        // 【核心大招】：Hook onLayoutChildren
+        // 這是 RecyclerView 決定要把東西放在哪裡的函式。
+        // 每次有新訊息、或者畫面重繪，這個函式都會跑一次。
+        // 我們在這裡強制把 stackFromEnd 改成 false。
+        
+        patcher.before<LinearLayoutManager>(
+            "onLayoutChildren",
+            RecyclerView.Recycler::class.java,
+            RecyclerView.State::class.java
+        ) {
+            val manager = it.thisObject as LinearLayoutManager
+            
+            // 檢查：這是不是聊天室的 Manager？
+            if (manager === targetLayoutManager) {
+                // 如果不是手動跳轉狀態，強制關閉 StackFromEnd
+                if (!isManualJumping) {
+                    // 即使 Discord 剛剛把它設為 true，我們在佈局發生的前一刻把它改回 false
+                    // 這樣佈局出來的結果就是「不自動吸附」
+                    manager.stackFromEnd = false
+                }
+            }
+        }
+
+        // 雙重保險：攔截 setStackFromEnd
+        // 防止 Discord 在其他地方偷偷設定
+        patcher.before<LinearLayoutManager>(
+            "setStackFromEnd",
+            Boolean::class.javaPrimitiveType!!
+        ) {
+            if (it.thisObject === targetLayoutManager) {
+                if (!isManualJumping) {
+                    // 強制竄改參數為 false
+                    it.args[0] = false
+                }
+            }
+        }
+
+
+        // ==========================================
+        //  功能 3: 複製按鈕 (保持不變)
         // ==========================================
         
         val btnSize = DimenUtils.dpToPx(40)
