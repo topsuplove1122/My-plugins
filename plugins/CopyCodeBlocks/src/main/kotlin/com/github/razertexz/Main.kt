@@ -17,6 +17,7 @@ import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
 
 import com.lytefast.flexinput.R
+import androidx.recyclerview.widget.RecyclerView
 
 @AliucordPlugin(requiresRestart = true)
 class Main : Plugin() {
@@ -36,7 +37,8 @@ class Main : Plugin() {
         patcher.after<WidgetChatListAdapterItemMessage>("processMessageText", SimpleDraweeSpanTextView::class.java, MessageEntry::class.java) {
             val textView = it.args[0] as SimpleDraweeSpanTextView
             val messageEntry = it.args[1] as MessageEntry
-            val root = it.thisObject.itemView as ConstraintLayout
+            val holder = it.thisObject as RecyclerView.ViewHolder
+            val view = holder.itemView
 
             var copyBtn = root.findViewById<ImageView>(COPY_BTN_ID)
 
