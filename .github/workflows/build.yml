@@ -46,11 +46,11 @@ jobs:
           rm -f "$GITHUB_WORKSPACE/builds/"*.zip
           cp plugins/*/build/outputs/*.zip build/outputs/updater.json "$GITHUB_WORKSPACE/builds"
 
-      - name: Push Builds
-        run: |
-          cd "$GITHUB_WORKSPACE/builds"
-          git config --local user.email "actions@github.com"
-          git config --local user.name "GitHub Actions"
-          git add .
-          git commit -m "Build $GITHUB_SHA" || exit 0
-          git push
+      # - name: Push Builds
+      #   run: |
+      #     cd "$GITHUB_WORKSPACE/builds"
+      #     git config --local user.email "actions@github.com"
+      #     git config --local user.name "GitHub Actions"
+      #     git add .
+      #     git commit -m "Build $GITHUB_SHA" || exit 0
+      #     git push
