@@ -7,9 +7,9 @@ import android.view.View
 import android.view.MotionEvent
 import android.graphics.Color
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.LinearLayoutManager
 import android.view.ViewGroup
 
-// 引入 Fragment 以解決 onViewCreated 找不到的問題
 import androidx.fragment.app.Fragment 
 
 import com.aliucord.annotations.AliucordPlugin
@@ -21,7 +21,6 @@ import com.aliucord.utils.DimenUtils
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
-// 移除 WidgetChatList 的 Import，改用字串判斷，避免類別參照錯誤
 
 import com.lytefast.flexinput.R
 
@@ -30,28 +29,32 @@ class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
     
+    // 通行證時間戳記
     private var lastJumpRequestTime = 0L
 
+    // 聊天室 RecyclerView 的資源 ID (快取起來)
+    private var chatListRecyclerId = 0
+
     override fun start(ctx: Context) {
+        // 取得聊天室 RecyclerView 的 ID
+        chatListRecyclerId = Utils.getResId("chat_list_recycler_view", "id")
+
         // ==========================================
-        //  功能 0: 監聽「跳到底部」按鈕 (修復崩潰版)
+        //  功能 0: 監聽「跳到底部」按鈕
         // ==========================================
-        
-        // 【關鍵修改】改成 Hook 'Fragment'，而不是 'WidgetChatList'
-        // 因為 WidgetChatList 沒有定義 onViewCreated，但 Fragment 一定有。
         patcher.after<Fragment>("onViewCreated", View::class.java, android.os.Bundle::class.java) {
-            // 檢查當前的物件是不是聊天室 (WidgetChatList)
-            // 使用字串名稱比對，最安全，不會有 Import 錯誤
-            if (it.thisObject::class.java.name == "com.discord.widgets.chat.list.WidgetChatList") {
+            // 只在聊天室 Fragment 執行
+            if (it.thisObject::class.java.name.contains("WidgetChatList")) {
                 val view = it.args[0] as View
-                val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
                 
+                // 1. 綁定「跳到底部」按鈕
+                val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
                 if (scrollBtnId != 0) {
                     val scrollBtn = view.findViewById<View>(scrollBtnId)
                     if (scrollBtn != null) {
                         scrollBtn.setOnTouchListener { _, event ->
                             if (event.action == MotionEvent.ACTION_DOWN) {
-                                // 發放通行證
+                                // 給予 2 秒的捲動權限
                                 lastJumpRequestTime = System.currentTimeMillis()
                             }
                             false 
@@ -62,41 +65,68 @@ class Main : Plugin() {
         }
 
         // ==========================================
-        //  功能 1: 智慧型防捲動 (Anti-Scroll)
+        //  功能 1: 強力防捲動 (Anti-Scroll)
         // ==========================================
         
-        // 1. 攔截 scrollToPosition
-        patcher.before<RecyclerView>(
-            "scrollToPosition", 
-            Int::class.javaPrimitiveType!! 
-        ) {
-            try {
-                // 檢查通行證 (1.5秒內)
-                val isAllowed = (System.currentTimeMillis() - lastJumpRequestTime) < 1500
-                if (!isAllowed) {
-                    val adapter = (it.thisObject as RecyclerView).adapter
-                    // 確認是聊天室 Adapter 才攔截
-                    if (adapter != null && adapter::class.java.name.contains("WidgetChatListAdapter")) {
-                        it.result = null // 阻止執行
-                    }
+        // 定義攔截邏輯
+        // 參數說明： checkRecycler: 是否要檢查 RecyclerView 的 ID (如果是 Hook LayoutManager 則很難檢查，設為 false)
+        fun shouldBlock(obj: Any, checkRecycler: Boolean): Boolean {
+            // 1. 檢查是否有通行證 (按下了按鈕)
+            if ((System.currentTimeMillis() - lastJumpRequestTime) < 2000) {
+                return false // 有通行證，不攔截
+            }
+
+            // 2. 檢查目標是否為聊天室 (如果 checkRecycler 為 true)
+            if (checkRecycler && chatListRecyclerId != 0 && obj is RecyclerView) {
+                if (obj.id != chatListRecyclerId) {
+                    return false // 不是聊天室列表，不攔截
                 }
-            } catch (e: Exception) {}
+            }
+            
+            // 3. 如果是 LayoutManager，我們假設它是在聊天室環境下被呼叫的
+            // (因為很難從 LayoutManager 反推回 RecyclerView ID，除非用反射，太慢)
+            // 為了避免誤殺，這裡其實是「寧可錯殺一千(其他列表可能也無法程式化捲動)，不可放過一個(聊天室自動捲動)」
+            // 但因為手動滑動不受 scrollToPosition 影響，所以副作用很小。
+            
+            return true // 攔截！
         }
 
-        // 2. 攔截 smoothScrollToPosition (Discord 主要用這個)
-        patcher.before<RecyclerView>(
-            "smoothScrollToPosition", 
-            Int::class.javaPrimitiveType!! 
+        // --- Hook RecyclerView 的方法 ---
+
+        patcher.before<RecyclerView>("scrollToPosition", Int::class.javaPrimitiveType!!) {
+            if (shouldBlock(it.thisObject, true)) it.result = null
+        }
+
+        patcher.before<RecyclerView>("smoothScrollToPosition", Int::class.javaPrimitiveType!!) {
+            if (shouldBlock(it.thisObject, true)) it.result = null
+        }
+
+        // --- Hook LinearLayoutManager 的方法 (這是你之前可能漏掉的關鍵) ---
+        // Discord 很喜歡直接叫用 LayoutManager 來做精確定位
+
+        patcher.before<LinearLayoutManager>(
+            "scrollToPosition", 
+            Int::class.javaPrimitiveType!!
         ) {
-            try {
-                val isAllowed = (System.currentTimeMillis() - lastJumpRequestTime) < 1500
-                if (!isAllowed) {
-                    val adapter = (it.thisObject as RecyclerView).adapter
-                    if (adapter != null && adapter::class.java.name.contains("WidgetChatListAdapter")) {
-                        it.result = null
-                    }
-                }
-            } catch (e: Exception) {}
+            // 對於 LayoutManager，我們無法輕易檢查 ID，直接依賴通行證機制
+            if (shouldBlock(it.thisObject, false)) it.result = null
+        }
+
+        patcher.before<LinearLayoutManager>(
+            "smoothScrollToPosition", 
+            RecyclerView::class.java, 
+            RecyclerView.State::class.java, 
+            Int::class.javaPrimitiveType!!
+        ) {
+            if (shouldBlock(it.thisObject, false)) it.result = null
+        }
+
+        patcher.before<LinearLayoutManager>(
+            "scrollToPositionWithOffset",
+            Int::class.javaPrimitiveType!!,
+            Int::class.javaPrimitiveType!!
+        ) { 
+            if (shouldBlock(it.thisObject, false)) it.result = null
         }
 
         // ==========================================
