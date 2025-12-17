@@ -30,146 +30,77 @@ class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
     
-    private var lastJumpRequestTime = 0L
-    private var chatRecyclerId = 0
+    // 標記：是否正在執行「跳到底部」的操作
+    private var isJumping = false
 
     override fun start(ctx: Context) {
         
-        chatRecyclerId = Utils.getResId("chat_list_recycler_view", "id")
-
         // ==========================================
-        //  功能 0: 監聽「跳到底部」按鈕
+        //  功能 1: 狀態強制修正 (State Enforcer)
         // ==========================================
+        
         patcher.after<Fragment>("onViewCreated", View::class.java, Bundle::class.java) {
-            // 寬鬆檢查，只要名稱包含 WidgetChatList 就算
             if (it.thisObject::class.java.name.contains("WidgetChatList")) {
                 val view = it.args[0] as View
                 
-                // 1. 嘗試一開始就強制關閉吸附
-                try {
-                    if (chatRecyclerId != 0) {
-                        val recycler = view.findViewById<RecyclerView>(chatRecyclerId)
-                        val manager = recycler?.layoutManager as? LinearLayoutManager
+                val recyclerId = Utils.getResId("chat_list_recycler_view", "id")
+                if (recyclerId != 0) {
+                    val recycler = view.findViewById<RecyclerView>(recyclerId)
+                    if (recycler != null) {
+                        
+                        // 1. 初始化時先關閉
+                        val manager = recycler.layoutManager as? LinearLayoutManager
                         manager?.stackFromEnd = false
-                    }
-                } catch (e: Exception) {}
 
-                // 2. 綁定按鈕
+                        // 2. 【核心大招】監聽佈局變更
+                        // 每當有新訊息進來，RecyclerView 會重新佈局 (Layout)
+                        // 我們就在這一瞬間，檢查 stackFromEnd，如果是 true 且沒在跳轉，就強制關掉！
+                        recycler.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                            if (!isJumping) {
+                                val lm = recycler.layoutManager as? LinearLayoutManager
+                                // 只要發現它被偷偷改成 true，立刻改回 false
+                                if (lm != null && lm.stackFromEnd) {
+                                    lm.stackFromEnd = false
+                                }
+                            }
+                        }
+
+                        // 3. 監聽使用者滑動
+                        // 只要手指一碰螢幕，就視為停止跳轉，立刻鎖定
+                        recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                                    isJumping = false
+                                    (recyclerView.layoutManager as? LinearLayoutManager)?.stackFromEnd = false
+                                }
+                            }
+                        })
+                    }
+                }
+
+                // 4. 綁定按鈕
                 val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
                 if (scrollBtnId != 0) {
                     val scrollBtn = view.findViewById<View>(scrollBtnId)
                     scrollBtn?.setOnTouchListener { _, event ->
                         if (event.action == MotionEvent.ACTION_DOWN) {
-                            // 發放通行證
-                            lastJumpRequestTime = System.currentTimeMillis()
+                            // 按下按鈕時，允許置底
+                            isJumping = true
                             
-                            // 手動觸發跳轉
-                            try {
-                                val recycler = view.findViewById<RecyclerView>(chatRecyclerId)
-                                val manager = recycler?.layoutManager as? LinearLayoutManager
-                                if (manager != null) {
-                                    // 暫時開啟吸附，這樣才能跳到底
-                                    manager.stackFromEnd = true 
-                                    manager.scrollToPosition(manager.itemCount - 1)
-                                }
-                            } catch (e: Exception) {}
+                            val recycler = view.findViewById<RecyclerView>(recyclerId)
+                            val manager = recycler?.layoutManager as? LinearLayoutManager
+                            if (manager != null) {
+                                // 開啟吸附功能
+                                manager.stackFromEnd = true
+                                // 強制捲動
+                                manager.scrollToPosition(manager.itemCount - 1)
+                            }
                         }
                         false 
                     }
                 }
             }
         }
-
-        // ==========================================
-        //  功能 1: 參數竄改與攔截 (Before Hooks)
-        // ==========================================
-
-        fun shouldBlock(obj: Any): Boolean {
-            // 1. 檢查通行證 (2秒內)
-            if ((System.currentTimeMillis() - lastJumpRequestTime) < 2000) {
-                return false // 有通行證，放行
-            }
-            
-            // 2. 檢查是不是聊天室
-            // 為了防止誤殺，如果沒有找到 ID，我們稍微保守一點
-            if (chatRecyclerId != 0 && obj is RecyclerView) {
-                if (obj.id == chatRecyclerId) return true
-            }
-            
-            // 3. LayoutManager 很難判斷 ID，所以我們採取「寧可錯殺」策略
-            if (obj is LinearLayoutManager) {
-                return true
-            }
-
-            return false
-        }
-
-        // --- 1. 綁架 setStackFromEnd (竄改參數) ---
-        // 當 Discord 想設為 True 時，我們偷偷改成 False
-        patcher.before<LinearLayoutManager>(
-            "setStackFromEnd", 
-            Boolean::class.javaPrimitiveType!!
-        ) {
-            if (shouldBlock(it.thisObject)) {
-                // 【關鍵】直接修改參數
-                // 原本是 true，我們改成 false，然後讓方法繼續執行
-                // 這樣 Discord 就不會報錯，但效果被我們改掉了
-                it.args[0] = false
-            }
-        }
-
-        // --- 2. 攔截 scrollToPosition (取消執行) ---
-        // 在 Aliucord 的 before hook 中，設定 result = null 會跳過原方法執行
-        patcher.before<RecyclerView>(
-            "scrollToPosition", 
-            Int::class.javaPrimitiveType!!
-        ) {
-            if (shouldBlock(it.thisObject)) {
-                it.result = null // 攔截！不執行！
-            }
-        }
-
-        patcher.before<RecyclerView>(
-            "smoothScrollToPosition", 
-            Int::class.javaPrimitiveType!!
-        ) {
-            if (shouldBlock(it.thisObject)) {
-                it.result = null
-            }
-        }
-        
-        // --- 3. 攔截 LayoutManager 的捲動 ---
-        
-        patcher.before<LinearLayoutManager>(
-            "scrollToPositionWithOffset",
-            Int::class.javaPrimitiveType!!,
-            Int::class.javaPrimitiveType!!
-        ) {
-            if (shouldBlock(it.thisObject)) {
-                it.result = null
-            }
-        }
-        
-        patcher.before<LinearLayoutManager>(
-            "scrollToPosition",
-            Int::class.javaPrimitiveType!!
-        ) {
-             if (shouldBlock(it.thisObject)) {
-                 it.result = null
-             }
-        }
-        
-        patcher.before<LinearLayoutManager>(
-            "smoothScrollToPosition",
-            RecyclerView::class.java,
-            RecyclerView.State::class.java,
-            Int::class.javaPrimitiveType!!
-        ) {
-             if (shouldBlock(it.thisObject)) {
-                 it.result = null
-             }
-        }
-
 
         // ==========================================
         //  功能 2: 複製按鈕 (保持不變)
