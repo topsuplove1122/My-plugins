@@ -17,7 +17,6 @@ import com.aliucord.utils.DimenUtils
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
-// 移除錯誤的 Import，改用 Reflect 或者更通用的方式
 
 import com.lytefast.flexinput.R
 
@@ -31,6 +30,7 @@ class Main : Plugin() {
         val btnPadding = DimenUtils.dpToPx(8)
         val btnMargin = DimenUtils.dpToPx(4)
 
+        // 準備圖示
         val iconText = ctx.getDrawable(R.e.ic_copy_24dp)?.mutate()
         iconText?.setTint(Color.CYAN)
 
@@ -46,7 +46,9 @@ class Main : Plugin() {
             val holder = it.thisObject as RecyclerView.ViewHolder
             val root = holder.itemView as ConstraintLayout
 
-            // 1. 藍色按鈕：複製文字
+            // ==========================================
+            // 1. 藍色按鈕：複製文字 (右上角)
+            // ==========================================
             var btnText = root.findViewById<ImageView>(ID_BTN_COPY_TEXT)
             if (btnText == null) {
                 btnText = ImageView(root.context).apply {
@@ -71,52 +73,30 @@ class Main : Plugin() {
                 Utils.showToast("已複製文字！")
             }
 
-            // 2. 紅色按鈕：複製連結
+            // ==========================================
+            // 2. 紅色按鈕：複製連結 (右下角)
+            // ==========================================
             var targetUrl: String? = null
             
-            // 使用更安全的方式遍歷 Components
-            try {
-                // messageEntry.message.components 是一個 List<MessageComponent>
-                // 但為了避免 Import 錯誤，我們用反射或直接檢查內容
-                val components = messageEntry.message.components
-                if (components != null && components.isNotEmpty()) {
-                    // 遍歷每一行 (ActionRow)
-                    for (component in components) {
-                        // 檢查這一行裡面的按鈕
-                        // 因為無法直接存取 components 屬性，我們用 toString() 簡單判斷
-                        // 或者假設它是 ActionRowComponent
-                        // 這裡為了編譯通過，我們先只檢查 Embed 連結，暫時跳過 Button 連結的複雜檢查
-                        // 因為 Button 的類別在不同版本可能不同
-                    }
-                }
-            } catch (e: Exception) {
-                // 忽略錯誤
-            }
-
-            // 主要檢查 Embed 連結 (這是最常見的情況)
+            // 檢查 Embeds (通常 "Donor coord" 連結會藏在這裡)
             val embeds = messageEntry.message.embeds
             if (embeds.isNotEmpty()) {
-                // 使用 getter 存取 url，而不是直接存取屬性
-                // 注意：在 Kotlin 中，getMessage().getEmbeds().get(0).getUrl()
                 val embed = embeds[0]
-                // 嘗試反射獲取 url，因為直接存取可能是 private
+                // 【關鍵修復】使用反射強制讀取 private 的 url 欄位
                 try {
-                    // 嘗試直接讀取屬性 (Kotlin 會自動轉成 getter)
-                    targetUrl = embed.url
-                } catch (e: Throwable) {
-                    // 如果失敗，嘗試用反射
-                    try {
-                        val method = embed.javaClass.getMethod("getUrl")
-                        targetUrl = method.invoke(embed) as String?
-                    } catch (e2: Throwable) {
-                         // 再次失敗，可能是 field
-                         // 這裡通常 embed.url 在 Kotlin 是可以的，之前的錯誤是因為它可能是 nullable String?
-                    }
+                    // 嘗試獲取 "url" 欄位
+                    val urlField = embed::class.java.getDeclaredField("url")
+                    urlField.isAccessible = true // 暴力破解 private 限制
+                    targetUrl = urlField.get(embed) as String?
+                } catch (e: Exception) {
+                    // 如果失敗，嘗試獲取 "raw" 屬性或其他可能的位置
+                    // 有些版本的 Discord 使用不同的欄位名稱，但通常 url 是標準的
                 }
             }
 
             var btnLink = root.findViewById<ImageView>(ID_BTN_COPY_LINK)
             
+            // 只有當找到 URL 時，才顯示紅色按鈕
             if (targetUrl != null && targetUrl!!.isNotEmpty()) {
                 if (btnLink == null) {
                     btnLink = ImageView(root.context).apply {
@@ -125,6 +105,7 @@ class Main : Plugin() {
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         setPadding(btnPadding, btnPadding, btnPadding, btnPadding)
 
+                        // 設定在右下角
                         layoutParams = ConstraintLayout.LayoutParams(btnSize, btnSize).apply {
                             bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
                             endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
@@ -135,7 +116,7 @@ class Main : Plugin() {
                     root.addView(btnLink)
                 }
                 btnLink.visibility = View.VISIBLE
-                val finalUrl = targetUrl // 為了 Lambda 閉包
+                val finalUrl = targetUrl
                 btnLink.setOnClickListener {
                     Utils.setClipboard(finalUrl, finalUrl)
                     Utils.showToast("已複製連結！")
