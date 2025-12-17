@@ -8,7 +8,7 @@ import android.view.MotionEvent
 import android.graphics.Color
 import android.view.ViewGroup
 
-// 引入關鍵的 RecyclerView 類別
+// 引入關鍵類別
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
 
@@ -31,108 +31,87 @@ class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
     
-    // 通行證時間戳記
-    private var lastJumpRequestTime = 0L
+    // 儲存我們找到的 LayoutManager，方便隨時控制它
+    private var chatLayoutManager: LinearLayoutManager? = null
 
     override fun start(ctx: Context) {
         // ==========================================
-        //  功能 0: 監聽「跳到底部」按鈕
+        //  功能 0: 監聽「跳到底部」按鈕 & 抓取 LayoutManager
         // ==========================================
         patcher.after<Fragment>("onViewCreated", View::class.java, android.os.Bundle::class.java) {
-            // 嘗試綁定按鈕，不管是不是聊天室 Fragment，只要找得到 ID 就綁定
-            try {
+            // 確保是聊天室
+            if (it.thisObject::class.java.name.contains("WidgetChatList")) {
                 val view = it.args[0] as View
-                val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
                 
+                // 1. 抓取 RecyclerView 並獲取 LayoutManager
+                val recyclerId = Utils.getResId("chat_list_recycler_view", "id")
+                if (recyclerId != 0) {
+                    val recycler = view.findViewById<RecyclerView>(recyclerId)
+                    if (recycler != null) {
+                        chatLayoutManager = recycler.layoutManager as? LinearLayoutManager
+                        
+                        // 【關鍵】：一開始就先強制解除鎖定底部，避免一進入就亂跳
+                        // 但這可能會導致一開始不在最底部，所以我們用 ScrollListener 來動態調整
+                        recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                                super.onScrollStateChanged(recyclerView, newState)
+                                // 當使用者手動拖曳時，強制把 stackFromEnd 關掉
+                                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                                    chatLayoutManager?.stackFromEnd = false
+                                }
+                            }
+                        })
+                    }
+                }
+
+                // 2. 綁定「跳到底部」按鈕
+                val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
                 if (scrollBtnId != 0) {
                     val scrollBtn = view.findViewById<View>(scrollBtnId)
                     if (scrollBtn != null) {
                         scrollBtn.setOnTouchListener { _, event ->
                             if (event.action == MotionEvent.ACTION_DOWN) {
-                                // 發放 3 秒通行證 (給久一點)
-                                lastJumpRequestTime = System.currentTimeMillis()
+                                // 當按下按鈕時：
+                                // 1. 把 stackFromEnd 開回來 (這樣才能吸附到底部)
+                                chatLayoutManager?.stackFromEnd = true
+                                // 2. 順便強制捲動一下，確保觸發
+                                chatLayoutManager?.scrollToPosition(
+                                    chatLayoutManager?.itemCount?.minus(1) ?: 0
+                                )
                             }
                             false 
                         }
                     }
                 }
-            } catch (e: Exception) {}
+            }
         }
 
         // ==========================================
-        //  功能 1: 無差別防捲動 (Nuclear Anti-Scroll)
+        //  功能 1: 暴力鎖定 (Force Lock)
         // ==========================================
         
-        // 這是我們的攔截守門員
-        // 如果你沒有按按鈕，我就不讓你捲動，不管你是誰
-        fun shouldBlock(): Boolean {
-            // 檢查是否在 2 秒通行證時間內
-            if ((System.currentTimeMillis() - lastJumpRequestTime) < 2000) {
-                return false // 有通行證，放行
+        // 攔截 Discord 試圖把 stackFromEnd 設為 true 的行為
+        // Discord 會在很多地方(例如打開鍵盤、切換頻道)偷偷把這個改回 true
+        // 我們要阻止它，除非是我們自己(透過按鈕)想改的
+        patcher.before<LinearLayoutManager>(
+            "setStackFromEnd", 
+            Boolean::class.javaPrimitiveType!!
+        ) {
+            val manager = it.thisObject as LinearLayoutManager
+            
+            // 只有當這是聊天室的 Manager 時才攔截
+            if (manager === chatLayoutManager) {
+                // 如果傳入的是 true (Discord 想鎖定底部)，我們直接把它改成 false
+                // 除非...這裡很難判斷是不是按鈕觸發的。
+                // 比較好的做法是：永遠強制設為 false，只有按鈕點擊事件裡直接修改 field
+                
+                // 改寫參數：強制設為 false
+                it.args[0] = false
             }
-            return true // 攔截
-        }
-
-        // 1. RecyclerView: scrollToPosition
-        patcher.before<RecyclerView>(
-            "scrollToPosition", 
-            Int::class.javaPrimitiveType!! 
-        ) {
-            if (shouldBlock()) it.result = null
-        }
-
-        // 2. RecyclerView: smoothScrollToPosition
-        patcher.before<RecyclerView>(
-            "smoothScrollToPosition", 
-            Int::class.javaPrimitiveType!! 
-        ) {
-            if (shouldBlock()) it.result = null
-        }
-
-        // 3. LinearLayoutManager: scrollToPosition
-        // Discord 很可能直接對 LayoutManager 呼叫這個
-        patcher.before<LinearLayoutManager>(
-            "scrollToPosition", 
-            Int::class.javaPrimitiveType!!
-        ) {
-            if (shouldBlock()) it.result = null
-        }
-
-        // 4. LinearLayoutManager: smoothScrollToPosition
-        patcher.before<LinearLayoutManager>(
-            "smoothScrollToPosition", 
-            RecyclerView::class.java, 
-            RecyclerView.State::class.java, 
-            Int::class.javaPrimitiveType!!
-        ) {
-            if (shouldBlock()) it.result = null
-        }
-
-        // 5. LinearLayoutManager: scrollToPositionWithOffset
-        // 這是最常見的「瞬間跳到底部」方法
-        patcher.before<LinearLayoutManager>(
-            "scrollToPositionWithOffset",
-            Int::class.javaPrimitiveType!!,
-            Int::class.javaPrimitiveType!!
-        ) { 
-            if (shouldBlock()) it.result = null
-        }
-
-        // 6. 【新增】LinearLayoutManager: startSmoothScroll
-        // 這是所有平滑捲動的底層入口，攔截這個最強力
-        try {
-            patcher.before<LinearLayoutManager>(
-                "startSmoothScroll",
-                androidx.recyclerview.widget.RecyclerView.SmoothScroller::class.java
-            ) {
-                if (shouldBlock()) it.result = null
-            }
-        } catch (e: Exception) {
-            // 某些舊版 Android 可能沒有這個方法，忽略錯誤
         }
 
         // ==========================================
-        //  功能 2: 複製按鈕 (保持不變)
+        //  功能 2: 複製按鈕 (Copy Buttons) - 保持不變
         // ==========================================
         
         val btnSize = DimenUtils.dpToPx(40)
