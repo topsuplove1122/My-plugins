@@ -28,9 +28,13 @@ class Main : Plugin() {
     override fun start(ctx: Context) {
         val btnSize = DimenUtils.dpToPx(40)
         val btnPadding = DimenUtils.dpToPx(8)
-        val btnMargin = DimenUtils.dpToPx(4)
+        
+        // 【關鍵調整 1】原本是正數 (4)，現在改成負數 (-5)
+        // 這會把按鈕往上拉約 5dp。如果不夠高，可以改成 -8 或 -10
+        val btnTopMargin = DimenUtils.dpToPx(-5) 
+        
+        val btnGap = DimenUtils.dpToPx(4) // 按鈕之間的間距
 
-        // 準備圖示
         val iconText = ctx.getDrawable(R.e.ic_copy_24dp)?.mutate()
         iconText?.setTint(Color.CYAN)
 
@@ -47,7 +51,7 @@ class Main : Plugin() {
             val root = holder.itemView as ConstraintLayout
 
             // ==========================================
-            // 1. 藍色按鈕：複製文字 (右上角)
+            // 1. 藍色按鈕 (文字) - 主定位點
             // ==========================================
             var btnText = root.findViewById<ImageView>(ID_BTN_COPY_TEXT)
             if (btnText == null) {
@@ -60,8 +64,10 @@ class Main : Plugin() {
                     layoutParams = ConstraintLayout.LayoutParams(btnSize, btnSize).apply {
                         topToTop = ConstraintLayout.LayoutParams.PARENT_ID
                         endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
-                        topMargin = btnMargin
-                        rightMargin = btnMargin
+                        
+                        // 這裡使用負邊距把它往上提
+                        topMargin = btnTopMargin 
+                        rightMargin = 0 // 靠最右邊
                     }
                 }
                 root.addView(btnText)
@@ -74,29 +80,21 @@ class Main : Plugin() {
             }
 
             // ==========================================
-            // 2. 紅色按鈕：複製連結 (右下角)
+            // 2. 紅色按鈕 (連結) - 跟隨藍色按鈕
             // ==========================================
             var targetUrl: String? = null
-            
-            // 檢查 Embeds (通常 "Donor coord" 連結會藏在這裡)
             val embeds = messageEntry.message.embeds
             if (embeds.isNotEmpty()) {
                 val embed = embeds[0]
-                // 【關鍵修復】使用反射強制讀取 private 的 url 欄位
                 try {
-                    // 嘗試獲取 "url" 欄位
                     val urlField = embed::class.java.getDeclaredField("url")
-                    urlField.isAccessible = true // 暴力破解 private 限制
+                    urlField.isAccessible = true
                     targetUrl = urlField.get(embed) as String?
-                } catch (e: Exception) {
-                    // 如果失敗，嘗試獲取 "raw" 屬性或其他可能的位置
-                    // 有些版本的 Discord 使用不同的欄位名稱，但通常 url 是標準的
-                }
+                } catch (e: Exception) {}
             }
 
             var btnLink = root.findViewById<ImageView>(ID_BTN_COPY_LINK)
             
-            // 只有當找到 URL 時，才顯示紅色按鈕
             if (targetUrl != null && targetUrl!!.isNotEmpty()) {
                 if (btnLink == null) {
                     btnLink = ImageView(root.context).apply {
@@ -105,12 +103,16 @@ class Main : Plugin() {
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         setPadding(btnPadding, btnPadding, btnPadding, btnPadding)
 
-                        // 設定在右下角
                         layoutParams = ConstraintLayout.LayoutParams(btnSize, btnSize).apply {
-                            bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
-                            endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
-                            bottomMargin = btnMargin
-                            rightMargin = btnMargin
+                            // 【關鍵調整 2】
+                            // 它的頂部對齊藍色按鈕的頂部 (這樣就會一起上去)
+                            topToTop = ID_BTN_COPY_TEXT 
+                            
+                            // 它的右邊接在藍色按鈕的左邊
+                            endToStart = ID_BTN_COPY_TEXT 
+                            
+                            // 這裡只需要設定右邊距(兩按鈕的間隔)，不需要設定 topMargin
+                            rightMargin = btnGap 
                         }
                     }
                     root.addView(btnLink)
