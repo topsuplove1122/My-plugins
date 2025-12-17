@@ -6,9 +6,11 @@ import android.widget.ImageView
 import android.view.View
 import android.view.MotionEvent
 import android.graphics.Color
+import android.view.ViewGroup
+
+// 引入關鍵的 RecyclerView 類別
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
-import android.view.ViewGroup
 
 import androidx.fragment.app.Fragment 
 
@@ -32,105 +34,105 @@ class Main : Plugin() {
     // 通行證時間戳記
     private var lastJumpRequestTime = 0L
 
-    // 聊天室 RecyclerView 的資源 ID (快取起來)
-    private var chatListRecyclerId = 0
-
     override fun start(ctx: Context) {
-        // 取得聊天室 RecyclerView 的 ID
-        chatListRecyclerId = Utils.getResId("chat_list_recycler_view", "id")
-
         // ==========================================
         //  功能 0: 監聽「跳到底部」按鈕
         // ==========================================
         patcher.after<Fragment>("onViewCreated", View::class.java, android.os.Bundle::class.java) {
-            // 只在聊天室 Fragment 執行
-            if (it.thisObject::class.java.name.contains("WidgetChatList")) {
+            // 嘗試綁定按鈕，不管是不是聊天室 Fragment，只要找得到 ID 就綁定
+            try {
                 val view = it.args[0] as View
-                
-                // 1. 綁定「跳到底部」按鈕
                 val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
+                
                 if (scrollBtnId != 0) {
                     val scrollBtn = view.findViewById<View>(scrollBtnId)
                     if (scrollBtn != null) {
                         scrollBtn.setOnTouchListener { _, event ->
                             if (event.action == MotionEvent.ACTION_DOWN) {
-                                // 給予 2 秒的捲動權限
+                                // 發放 3 秒通行證 (給久一點)
                                 lastJumpRequestTime = System.currentTimeMillis()
                             }
                             false 
                         }
                     }
                 }
-            }
+            } catch (e: Exception) {}
         }
 
         // ==========================================
-        //  功能 1: 強力防捲動 (Anti-Scroll)
+        //  功能 1: 無差別防捲動 (Nuclear Anti-Scroll)
         // ==========================================
         
-        // 定義攔截邏輯
-        // 參數說明： checkRecycler: 是否要檢查 RecyclerView 的 ID (如果是 Hook LayoutManager 則很難檢查，設為 false)
-        fun shouldBlock(obj: Any, checkRecycler: Boolean): Boolean {
-            // 1. 檢查是否有通行證 (按下了按鈕)
+        // 這是我們的攔截守門員
+        // 如果你沒有按按鈕，我就不讓你捲動，不管你是誰
+        fun shouldBlock(): Boolean {
+            // 檢查是否在 2 秒通行證時間內
             if ((System.currentTimeMillis() - lastJumpRequestTime) < 2000) {
-                return false // 有通行證，不攔截
+                return false // 有通行證，放行
             }
-
-            // 2. 檢查目標是否為聊天室 (如果 checkRecycler 為 true)
-            if (checkRecycler && chatListRecyclerId != 0 && obj is RecyclerView) {
-                if (obj.id != chatListRecyclerId) {
-                    return false // 不是聊天室列表，不攔截
-                }
-            }
-            
-            // 3. 如果是 LayoutManager，我們假設它是在聊天室環境下被呼叫的
-            // (因為很難從 LayoutManager 反推回 RecyclerView ID，除非用反射，太慢)
-            // 為了避免誤殺，這裡其實是「寧可錯殺一千(其他列表可能也無法程式化捲動)，不可放過一個(聊天室自動捲動)」
-            // 但因為手動滑動不受 scrollToPosition 影響，所以副作用很小。
-            
-            return true // 攔截！
+            return true // 攔截
         }
 
-        // --- Hook RecyclerView 的方法 ---
-
-        patcher.before<RecyclerView>("scrollToPosition", Int::class.javaPrimitiveType!!) {
-            if (shouldBlock(it.thisObject, true)) it.result = null
+        // 1. RecyclerView: scrollToPosition
+        patcher.before<RecyclerView>(
+            "scrollToPosition", 
+            Int::class.javaPrimitiveType!! 
+        ) {
+            if (shouldBlock()) it.result = null
         }
 
-        patcher.before<RecyclerView>("smoothScrollToPosition", Int::class.javaPrimitiveType!!) {
-            if (shouldBlock(it.thisObject, true)) it.result = null
+        // 2. RecyclerView: smoothScrollToPosition
+        patcher.before<RecyclerView>(
+            "smoothScrollToPosition", 
+            Int::class.javaPrimitiveType!! 
+        ) {
+            if (shouldBlock()) it.result = null
         }
 
-        // --- Hook LinearLayoutManager 的方法 (這是你之前可能漏掉的關鍵) ---
-        // Discord 很喜歡直接叫用 LayoutManager 來做精確定位
-
+        // 3. LinearLayoutManager: scrollToPosition
+        // Discord 很可能直接對 LayoutManager 呼叫這個
         patcher.before<LinearLayoutManager>(
             "scrollToPosition", 
             Int::class.javaPrimitiveType!!
         ) {
-            // 對於 LayoutManager，我們無法輕易檢查 ID，直接依賴通行證機制
-            if (shouldBlock(it.thisObject, false)) it.result = null
+            if (shouldBlock()) it.result = null
         }
 
+        // 4. LinearLayoutManager: smoothScrollToPosition
         patcher.before<LinearLayoutManager>(
             "smoothScrollToPosition", 
             RecyclerView::class.java, 
             RecyclerView.State::class.java, 
             Int::class.javaPrimitiveType!!
         ) {
-            if (shouldBlock(it.thisObject, false)) it.result = null
+            if (shouldBlock()) it.result = null
         }
 
+        // 5. LinearLayoutManager: scrollToPositionWithOffset
+        // 這是最常見的「瞬間跳到底部」方法
         patcher.before<LinearLayoutManager>(
             "scrollToPositionWithOffset",
             Int::class.javaPrimitiveType!!,
             Int::class.javaPrimitiveType!!
         ) { 
-            if (shouldBlock(it.thisObject, false)) it.result = null
+            if (shouldBlock()) it.result = null
+        }
+
+        // 6. 【新增】LinearLayoutManager: startSmoothScroll
+        // 這是所有平滑捲動的底層入口，攔截這個最強力
+        try {
+            patcher.before<LinearLayoutManager>(
+                "startSmoothScroll",
+                androidx.recyclerview.widget.RecyclerView.SmoothScroller::class.java
+            ) {
+                if (shouldBlock()) it.result = null
+            }
+        } catch (e: Exception) {
+            // 某些舊版 Android 可能沒有這個方法，忽略錯誤
         }
 
         // ==========================================
-        //  功能 2: 複製按鈕 (Copy Buttons)
+        //  功能 2: 複製按鈕 (保持不變)
         // ==========================================
         
         val btnSize = DimenUtils.dpToPx(40)
