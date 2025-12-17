@@ -3,15 +3,12 @@ package com.github.razertexz
 import android.content.Context
 import android.widget.ImageView
 import android.view.View
-import android.view.MotionEvent
 import android.graphics.Color
-import android.os.Bundle
+import android.view.ViewGroup
 
-// 【關鍵修正】補回遺失的 ConstraintLayout Import
+// 必要的 UI 元件 Import
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.recyclerview.widget.RecyclerView
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.fragment.app.Fragment 
 
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -27,128 +24,20 @@ import com.lytefast.flexinput.R
 
 @AliucordPlugin(requiresRestart = true)
 class Main : Plugin() {
+    // 定義按鈕 ID，避免衝突
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
-    
-    // 錨點變數
-    private var anchorIndex = -1
-    private var anchorOffset = 0
-    private var shouldRestore = false
-    
-    // 手動跳轉標記
-    private var isManualJumping = false
 
     override fun start(ctx: Context) {
         
-        // ==========================================
-        //  功能 1: 視角錨定 (Scroll Anchoring)
-        // ==========================================
-        
-        // 1. 佈局前 (Before)：記住我現在在哪裡
-        patcher.before<LinearLayoutManager>(
-            "onLayoutChildren",
-            RecyclerView.Recycler::class.java,
-            RecyclerView.State::class.java
-        ) {
-            val manager = it.thisObject as LinearLayoutManager
-            
-            // 如果正在手動跳轉，就不要紀錄，讓它自然捲動
-            if (isManualJumping) {
-                shouldRestore = false
-                return@before
-            }
-
-            try {
-                val firstPos = manager.findFirstVisibleItemPosition()
-                val lastPos = manager.findLastVisibleItemPosition()
-                val itemCount = manager.itemCount
-                
-                // 邏輯：如果還沒到底部 (最後一個看到的 item 不是總數的最後一個)
-                // 代表使用者正在閱讀舊訊息，開啟錨定保護
-                if (lastPos < itemCount - 1 && firstPos != -1) {
-                    shouldRestore = true
-                    
-                    // 記住現在第一則訊息是誰 (Index)
-                    anchorIndex = firstPos
-                    
-                    // 記住這則訊息距離頂部多少像素 (Offset)
-                    val view = manager.findViewByPosition(firstPos)
-                    anchorOffset = view?.top ?: 0
-                } else {
-                    // 在最底部，隨便它動
-                    shouldRestore = false
-                }
-            } catch (e: Exception) {
-                shouldRestore = false
-            }
-        }
-
-        // 2. 佈局後 (After)：把我丟回去
-        patcher.after<LinearLayoutManager>(
-            "onLayoutChildren",
-            RecyclerView.Recycler::class.java,
-            RecyclerView.State::class.java
-        ) {
-            val manager = it.thisObject as LinearLayoutManager
-            
-            if (shouldRestore && anchorIndex != -1) {
-                // 強制跳轉回剛剛記住的位置
-                manager.scrollToPositionWithOffset(anchorIndex, anchorOffset)
-                
-                // 重置狀態
-                shouldRestore = false 
-            }
-        }
-
-        // ==========================================
-        //  功能 2: 按鈕監聽 (手動跳轉)
-        // ==========================================
-        patcher.after<Fragment>("onViewCreated", View::class.java, Bundle::class.java) {
-            if (it.thisObject::class.java.name.contains("WidgetChatList")) {
-                val view = it.args[0] as View
-                val scrollBtnId = Utils.getResId("chat_list_scroll_to_bottom", "id")
-                val recyclerId = Utils.getResId("chat_list_recycler_view", "id")
-                
-                if (scrollBtnId != 0) {
-                    val scrollBtn = view.findViewById<View>(scrollBtnId)
-                    scrollBtn?.setOnTouchListener { _, event ->
-                        if (event.action == MotionEvent.ACTION_DOWN) {
-                            isManualJumping = true
-                            shouldRestore = false 
-                            
-                            val recycler = view.findViewById<RecyclerView>(recyclerId)
-                            val manager = recycler?.layoutManager as? LinearLayoutManager
-                            if (manager != null && manager.itemCount > 0) {
-                                manager.scrollToPosition(manager.itemCount - 1)
-                            }
-                            
-                            Utils.mainThread.postDelayed({
-                                isManualJumping = false
-                            }, 1000)
-                        }
-                        false 
-                    }
-                }
-            }
-        }
-
-        // ==========================================
-        //  功能 3: 複製按鈕 (Copy Buttons)
-        // ==========================================
-        setupCopyButtons(ctx)
-    }
-
-    private fun setupCopyButtons(ctx: Context) {
+        // 設定按鈕樣式參數
         val btnSize = DimenUtils.dpToPx(40)
         val btnPadding = DimenUtils.dpToPx(8)
         val btnTopMargin = DimenUtils.dpToPx(-5) 
         val btnGap = DimenUtils.dpToPx(4)
 
-        val iconText = ctx.getDrawable(R.e.ic_copy_24dp)?.mutate()
-        iconText?.setTint(Color.CYAN)
-
-        val iconLink = ctx.getDrawable(R.e.ic_copy_24dp)?.mutate()
-        iconLink?.setTint(Color.RED)
+        // 載入圖示 Drawable (只需要載入一次)
+        val iconDrawable = ctx.getDrawable(R.e.ic_copy_24dp)
 
         patcher.after<WidgetChatListAdapterItemMessage>(
             "processMessageText", 
@@ -159,11 +48,15 @@ class Main : Plugin() {
             val holder = it.thisObject as RecyclerView.ViewHolder
             val root = holder.itemView as ConstraintLayout
 
+            // ==========================================
+            // 1. 藍色按鈕 (複製文字)
+            // ==========================================
             var btnText = root.findViewById<ImageView>(ID_BTN_COPY_TEXT)
             if (btnText == null) {
                 btnText = ImageView(root.context).apply {
                     id = ID_BTN_COPY_TEXT
-                    if (iconText != null) setImageDrawable(iconText)
+                    // 設定圖示
+                    setImageDrawable(iconDrawable?.mutate()) 
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     setPadding(btnPadding, btnPadding, btnPadding, btnPadding)
                     
@@ -176,13 +69,24 @@ class Main : Plugin() {
                 }
                 root.addView(btnText)
             }
+            
+            // 【關鍵步驟 1】每次顯示時，先強制重置回「藍色」
+            // 這是為了防止 RecyclerView 拿別人的白色按鈕來用
             btnText.visibility = View.VISIBLE
+            btnText.setColorFilter(Color.CYAN) 
+
             btnText.setOnClickListener {
                 val content = messageEntry.message.content
                 Utils.setClipboard(content, content)
                 Utils.showToast("已複製文字！")
+                
+                // 【關鍵步驟 2】點擊後，變成「白色」
+                btnText.setColorFilter(Color.WHITE)
             }
 
+            // ==========================================
+            // 2. 紅色按鈕 (複製連結)
+            // ==========================================
             var targetUrl: String? = null
             val embeds = messageEntry.message.embeds
             if (embeds.isNotEmpty()) {
@@ -200,7 +104,7 @@ class Main : Plugin() {
                 if (btnLink == null) {
                     btnLink = ImageView(root.context).apply {
                         id = ID_BTN_COPY_LINK
-                        if (iconLink != null) setImageDrawable(iconLink)
+                        setImageDrawable(iconDrawable?.mutate())
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         setPadding(btnPadding, btnPadding, btnPadding, btnPadding)
 
@@ -212,11 +116,18 @@ class Main : Plugin() {
                     }
                     root.addView(btnLink)
                 }
+                
+                // 【關鍵步驟 1】重置回「紅色」
                 btnLink.visibility = View.VISIBLE
+                btnLink.setColorFilter(Color.RED)
+                
                 val finalUrl = targetUrl
                 btnLink.setOnClickListener {
                     Utils.setClipboard(finalUrl, finalUrl)
                     Utils.showToast("已複製連結！")
+                    
+                    // 【關鍵步驟 2】點擊後，變成「白色」
+                    btnLink.setColorFilter(Color.WHITE)
                 }
             } else {
                 btnLink?.visibility = View.GONE
