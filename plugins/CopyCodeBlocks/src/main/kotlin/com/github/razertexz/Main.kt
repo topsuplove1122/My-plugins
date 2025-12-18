@@ -1,43 +1,72 @@
 package com.github.razertexz
 
 import android.content.Context
-import android.widget.ImageView
-import android.view.View
 import android.graphics.Color
-import android.view.ViewGroup
-
-// 必要的 UI 元件 Import
+import android.view.View
+import android.widget.ImageView
 import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 
+import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.*
-import com.aliucord.Utils
 import com.aliucord.utils.DimenUtils
 
+// Discord 相關引用
+import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
 
+// 資源引用
 import com.lytefast.flexinput.R
+import rx.functions.Action0
 
 @AliucordPlugin(requiresRestart = true)
 class Main : Plugin() {
-    // 定義按鈕 ID，避免衝突
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
 
     override fun start(ctx: Context) {
-        
-        // 設定按鈕樣式參數
+        // ========================================================================
+        // 功能 1: 防止閱讀歷史訊息時自動跳轉 (Anti-Auto-Scroll)
+        // ========================================================================
+        patcher.before<WidgetChatListAdapter>(
+            "scrollToMessageId", // 目標方法
+            Long::class.javaPrimitiveType, // 參數 1: messageId (Long)
+            Action0::class.java            // 參數 2: onCompleted (Action0)
+        ) {
+            val adapter = it.thisObject as WidgetChatListAdapter
+            val layoutManager = adapter.layoutManager
+
+            if (layoutManager is LinearLayoutManager) {
+                // 獲取當前第一條可見項目的位置
+                // 因為 Discord 是 ReverseLayout，位置 0 代表最底部
+                val firstVisible = layoutManager.findFirstVisibleItemPosition()
+
+                // 如果位置大於 5 (代表使用者往上滑了，正在看歷史訊息)
+                // 則攔截這次的跳轉指令 (return null)
+                if (firstVisible > 5) {
+                    it.result = null
+                }
+            }
+        }
+
+        // ========================================================================
+        // 功能 2: 訊息複製按鈕 (Copy Buttons)
+        // ========================================================================
         val btnSize = DimenUtils.dpToPx(40)
         val btnPadding = DimenUtils.dpToPx(8)
         val btnTopMargin = DimenUtils.dpToPx(-5) 
         val btnGap = DimenUtils.dpToPx(4)
 
-        // 載入圖示 Drawable (只需要載入一次)
-        val iconDrawable = ctx.getDrawable(R.e.ic_copy_24dp)
+        val iconText = ctx.getDrawable(R.e.ic_copy_24dp)?.mutate()
+        iconText?.setTint(Color.CYAN)
+
+        val iconLink = ctx.getDrawable(R.e.ic_copy_24dp)?.mutate()
+        iconLink?.setTint(Color.RED)
 
         patcher.after<WidgetChatListAdapterItemMessage>(
             "processMessageText", 
@@ -48,15 +77,12 @@ class Main : Plugin() {
             val holder = it.thisObject as RecyclerView.ViewHolder
             val root = holder.itemView as ConstraintLayout
 
-            // ==========================================
-            // 1. 藍色按鈕 (複製文字)
-            // ==========================================
+            // --- 1. 藍色按鈕 (複製文字) ---
             var btnText = root.findViewById<ImageView>(ID_BTN_COPY_TEXT)
             if (btnText == null) {
                 btnText = ImageView(root.context).apply {
                     id = ID_BTN_COPY_TEXT
-                    // 設定圖示
-                    setImageDrawable(iconDrawable?.mutate()) 
+                    if (iconText != null) setImageDrawable(iconText)
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     setPadding(btnPadding, btnPadding, btnPadding, btnPadding)
                     
@@ -69,24 +95,14 @@ class Main : Plugin() {
                 }
                 root.addView(btnText)
             }
-            
-            // 【關鍵步驟 1】每次顯示時，先強制重置回「藍色」
-            // 這是為了防止 RecyclerView 拿別人的白色按鈕來用
             btnText.visibility = View.VISIBLE
-            btnText.setColorFilter(Color.CYAN) 
-
             btnText.setOnClickListener {
                 val content = messageEntry.message.content
                 Utils.setClipboard(content, content)
                 Utils.showToast("已複製文字！")
-                
-                // 【關鍵步驟 2】點擊後，變成「白色」
-                btnText.setColorFilter(Color.WHITE)
             }
 
-            // ==========================================
-            // 2. 紅色按鈕 (複製連結)
-            // ==========================================
+            // --- 2. 紅色按鈕 (複製連結) ---
             var targetUrl: String? = null
             val embeds = messageEntry.message.embeds
             if (embeds.isNotEmpty()) {
@@ -104,7 +120,7 @@ class Main : Plugin() {
                 if (btnLink == null) {
                     btnLink = ImageView(root.context).apply {
                         id = ID_BTN_COPY_LINK
-                        setImageDrawable(iconDrawable?.mutate())
+                        if (iconLink != null) setImageDrawable(iconLink)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         setPadding(btnPadding, btnPadding, btnPadding, btnPadding)
 
@@ -116,18 +132,11 @@ class Main : Plugin() {
                     }
                     root.addView(btnLink)
                 }
-                
-                // 【關鍵步驟 1】重置回「紅色」
                 btnLink.visibility = View.VISIBLE
-                btnLink.setColorFilter(Color.RED)
-                
                 val finalUrl = targetUrl
                 btnLink.setOnClickListener {
                     Utils.setClipboard(finalUrl, finalUrl)
                     Utils.showToast("已複製連結！")
-                    
-                    // 【關鍵步驟 2】點擊後，變成「白色」
-                    btnLink.setColorFilter(Color.WHITE)
                 }
             } else {
                 btnLink?.visibility = View.GONE
