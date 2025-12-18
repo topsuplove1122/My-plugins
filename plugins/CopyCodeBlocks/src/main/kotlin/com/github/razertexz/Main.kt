@@ -85,7 +85,7 @@ class Main : Plugin() {
                 // 【關鍵修改】：主動幫使用者 "往上拉一點點"
                 // scrollBy(0, 1) 在 Reverse Layout 中通常代表讓內容稍微位移
                 // 這會破壞系統的 "Anchor to Bottom" 判定
-                adapter.recycler.scrollBy(0, 1)
+                adapter.recycler.scrollBy(0, 10)
             } else {
                 wasAtBottom = false
             }
