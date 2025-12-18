@@ -143,8 +143,8 @@ class Main : Plugin() {
                         val description = descField.get(embed) as String?
                         
                         if (description != null) {
-                            // 修正：移除具名參數 "input ="
-                            val match = urlRegex.find(description)
+                            // 修正：明確傳入第二個參數 0 (startIndex)
+                            val match = urlRegex.find(description, 0)
                             if (match != null) {
                                 targetUrl = match.value
                             }
@@ -156,8 +156,8 @@ class Main : Plugin() {
             if (targetUrl == null && messageEntry.message.content != null) {
                  val contentStr = messageEntry.message.content
                  if (contentStr != null) {
-                     // 修正：移除具名參數 "input ="
-                     val match = urlRegex.find(contentStr)
+                     // 修正：明確傳入第二個參數 0 (startIndex)
+                     val match = urlRegex.find(contentStr, 0)
                      if (match != null) {
                          targetUrl = match.value
                      }
