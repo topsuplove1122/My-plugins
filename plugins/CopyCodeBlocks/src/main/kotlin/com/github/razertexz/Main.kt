@@ -7,6 +7,7 @@ import android.widget.ImageView
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.RecyclerView.AdapterDataObserver
 
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
@@ -15,6 +16,7 @@ import com.aliucord.patcher.*
 import com.aliucord.utils.DimenUtils
 
 // Discord Imports
+import com.discord.widgets.chat.list.WidgetChatList
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.MessageEntry
@@ -29,94 +31,70 @@ class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
 
-    // 狀態變數
-    private var wasAtBottom = false
-    private var oldListSize = 0
-
     override fun start(ctx: Context) {
         
         // ========================================================================
-        // Feature 1: 絕對防跳轉 (Absolute Anti-Auto-Scroll)
+        // Feature 1: 終極防跳轉 (Observer Anti-Auto-Scroll)
         // ========================================================================
         
-        // [A] 攔截系統跳轉
-        // 為了徹底防止它跳到底部，我們這裡做一個比較激進的攔截。
-        // 如果系統試圖跳到 MessageId = 0 (最新訊息)，我們直接擋掉。
-        // 副作用：你按聊天室右下角的「跳到底部」按鈕可能會失效一次，需要按兩次，
-        // 但這能保證新訊息絕對不會拉動你的畫面。
+        // [A] 攔截系統主動的滾動指令 (保持原樣，防止 App 強制介入)
         patcher.before<WidgetChatListAdapter>(
             "scrollToMessageId", 
             java.lang.Long.TYPE, 
             Action0::class.java            
         ) {
             val messageId = it.args[0] as Long
-            
-            // 如果目標是 0 (底部)，且我們不在看歷史訊息 (這通常是系統自動觸發的)
-            // 我們選擇攔截它。
             if (messageId == 0L) {
+                // 只有當目標是 0 (最新訊息) 時才攔截
                 it.result = null
             }
         }
 
-        val dataClass = try {
-            com.discord.widgets.chat.list.adapter.WidgetChatListAdapter.Data::class.java
-        } catch (e: Throwable) {
-            Class.forName("com.discord.widgets.chat.list.adapter.WidgetChatListAdapter\$Data")
-        }
-
-        // [B] 數據更新前：記錄狀態
-        patcher.before<WidgetChatListAdapter>(
-            "setData",
-            dataClass
+        // [B] 掛載數據監聽器
+        // 我們Hook WidgetChatList 的 onViewBound，這是介面初始化的時候
+        patcher.after<WidgetChatList>(
+            "onViewBound",
+            View::class.java
         ) {
-            val adapter = it.thisObject as WidgetChatListAdapter
-            val layoutManager = adapter.layoutManager as? LinearLayoutManager ?: return@before
+            val chatListFragment = it.thisObject as WidgetChatList
             
-            oldListSize = adapter.itemCount
+            // 透過反射獲取 adapter (因為它是 private 的)
+            val adapterField = chatListFragment::class.java.getDeclaredField("adapter")
+            adapterField.isAccessible = true
+            val adapter = adapterField.get(chatListFragment) as? WidgetChatListAdapter
 
-            // 嚴格判定：只有 Index 0 才是底部
-            val firstVisible = layoutManager.findFirstVisibleItemPosition()
-            wasAtBottom = (firstVisible == 0)
-        }
-
-        // [C] 數據更新後：使用 OnLayoutChangeListener 精準鎖定
-        patcher.after<WidgetChatListAdapter>(
-            "setData",
-            dataClass
-        ) {
-            val adapter = it.thisObject as WidgetChatListAdapter
-            val layoutManager = adapter.layoutManager as? LinearLayoutManager ?: return@after
-            
-            val newListSize = adapter.itemCount
-            val isNewItemAdded = newListSize > oldListSize
-
-            // 如果原本在底部，且有新訊息進來
-            if (wasAtBottom && isNewItemAdded) {
-                val recyclerView = adapter.recycler
-                
-                // 定義一個監聽器，在 Layout 完成的瞬間執行
-                val listener = object : View.OnLayoutChangeListener {
-                    override fun onLayoutChange(
-                        v: View?, left: Int, top: Int, right: Int, bottom: Int,
-                        oldLeft: Int, oldTop: Int, oldRight: Int, oldBottom: Int
-                    ) {
-                        // 立刻移除監聽器，避免重複觸發
-                        recyclerView.removeOnLayoutChangeListener(this)
+            if (adapter != null) {
+                // 註冊我們自己的觀察者
+                // 這會在 "新訊息真正插入列表" 的瞬間被觸發
+                adapter.registerAdapterDataObserver(object : AdapterDataObserver() {
+                    
+                    override fun onItemRangeInserted(positionStart: Int, itemCount: Int) {
+                        super.onItemRangeInserted(positionStart, itemCount)
                         
-                        // 【核心邏輯】
-                        // 此時新訊息已經插入到 Index 0，畫面可能已經被推上去了。
-                        // 我們強制將 Index 1 (也就是原本的舊訊息) 鎖定在底部 (Offset 0)。
-                        layoutManager.scrollToPositionWithOffset(1, 0)
+                        // 1. 檢查是否是插入在 Index 0 (最新訊息位置)
+                        if (positionStart == 0) {
+                            val layoutManager = adapter.layoutManager as? LinearLayoutManager ?: return
+                            
+                            // 2. 檢查使用者目前的位置
+                            val firstVisible = layoutManager.findFirstVisibleItemPosition()
+                            
+                            // 3. 判斷邏輯：
+                            // 如果 firstVisible 為 0 (貼底) 或 1 (剛被擠上來)
+                            // 這表示使用者原本在看最新的訊息。
+                            // 當新訊息插入(Index 0)時，原本的訊息變成了 Index 1。
+                            // 系統預設會顯示新的 Index 0，我們要強制它顯示 Index 1。
+                            if (firstVisible <= 1) {
+                                // 強制鎖定到 Index 1 (Offset 0 表示貼齊底部)
+                                layoutManager.scrollToPositionWithOffset(1, 0)
+                            }
+                        }
                     }
-                }
-                
-                // 掛載監聽器
-                recyclerView.addOnLayoutChangeListener(listener)
+                })
             }
         }
 
         // ========================================================================
-        // Feature 2: 複製按鈕 (保持不變)
+        // Feature 2: 複製按鈕 (保持原樣)
         // ========================================================================
         val btnSize = DimenUtils.dpToPx(40)
         val btnPadding = DimenUtils.dpToPx(8)
