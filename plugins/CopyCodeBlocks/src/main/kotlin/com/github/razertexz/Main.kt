@@ -29,12 +29,17 @@ class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
 
-    private var wasAtBottom = false
+    // 狀態變數：用來記錄更新前的位置
+    private var lastVisiblePosition = -1
     private var oldListSize = 0
 
     override fun start(ctx: Context) {
         
-        // --- Feature 1: Anti-Auto-Scroll ---
+        // ========================================================================
+        // Feature 1: 智慧型防跳轉 (Smart Anti-Auto-Scroll)
+        // ========================================================================
+        
+        // [A] 攔截系統主動發出的 "捲動到底部" 指令
         patcher.before<WidgetChatListAdapter>(
             "scrollToMessageId", 
             java.lang.Long.TYPE, 
@@ -42,9 +47,15 @@ class Main : Plugin() {
         ) {
             val adapter = it.thisObject as WidgetChatListAdapter
             val layoutManager = adapter.layoutManager
+
             if (layoutManager is LinearLayoutManager) {
                 val firstVisible = layoutManager.findFirstVisibleItemPosition()
-                if (firstVisible > 0) it.result = null
+                
+                // 如果使用者不在最底部 (大於 0)，我們就拒絕系統的強制跳轉指令
+                // 這可以防止切換頻道或重整時被強制拉回
+                if (firstVisible > 0) {
+                    it.result = null
+                }
             }
         }
 
@@ -54,29 +65,56 @@ class Main : Plugin() {
             Class.forName("com.discord.widgets.chat.list.adapter.WidgetChatListAdapter\$Data")
         }
 
-        patcher.before<WidgetChatListAdapter>("setData", dataClass) {
+        // [B] 數據更新前：記錄位置
+        patcher.before<WidgetChatListAdapter>(
+            "setData",
+            dataClass
+        ) {
             val adapter = it.thisObject as WidgetChatListAdapter
             val layoutManager = adapter.layoutManager as? LinearLayoutManager ?: return@before
+            
+            // 記錄舊的列表長度
             oldListSize = adapter.itemCount
-            val firstVisible = layoutManager.findFirstVisibleItemPosition()
-            wasAtBottom = (firstVisible == 0)
+
+            // 記錄目前看到哪裡
+            lastVisiblePosition = layoutManager.findFirstVisibleItemPosition()
         }
 
-        patcher.after<WidgetChatListAdapter>("setData", dataClass) {
+        // [C] 數據更新後：執行 "反推" 邏輯 (Counter-Push)
+        patcher.after<WidgetChatListAdapter>(
+            "setData",
+            dataClass
+        ) {
             val adapter = it.thisObject as WidgetChatListAdapter
             val layoutManager = adapter.layoutManager as? LinearLayoutManager ?: return@after
+            
             val newListSize = adapter.itemCount
             val isNewItemAdded = newListSize > oldListSize
-            if (wasAtBottom && isNewItemAdded) {
+
+            // 核心修正：
+            // 根據你的觀察，如果位置在 0, 1 (甚至 2)，系統會自動吸附到底部。
+            // 所以我們只要發現使用者在 "危險區" (<= 3)，我們就手動介入。
+            // * 3 是一個安全緩衝值，確保就算你是往上滑了兩三則，也不會被拉走。
+            val wasInSnappingZone = lastVisiblePosition <= 3
+
+            if (wasInSnappingZone && isNewItemAdded) {
                 adapter.recycler.postDelayed({
                     try {
-                        layoutManager.scrollToPositionWithOffset(1, 0)
+                        // 計算修正後的目標位置
+                        // 如果原本在 0，新訊息進來後，舊訊息變成了 1。我們就跳到 1。
+                        // 如果原本在 1，新訊息進來後，舊訊息變成了 2。我們就跳到 2。
+                        val targetPos = lastVisiblePosition + 1
+                        
+                        // 強制鎖定視圖
+                        layoutManager.scrollToPositionWithOffset(targetPos, 0)
                     } catch (e: Exception) { e.printStackTrace() }
-                }, 50)
+                }, 50) 
             }
         }
 
-        // --- Feature 2: Copy Buttons ---
+        // ========================================================================
+        // Feature 2: 複製按鈕 (已修正參數問題)
+        // ========================================================================
         val btnSize = DimenUtils.dpToPx(40)
         val btnPadding = DimenUtils.dpToPx(8)
         val btnTopMargin = DimenUtils.dpToPx(-5) 
@@ -143,7 +181,7 @@ class Main : Plugin() {
                         val description = descField.get(embed) as String?
                         
                         if (description != null) {
-                            // 修正：明確傳入第二個參數 0 (startIndex)
+                            // 修正：明確傳入 startIndex = 0
                             val match = urlRegex.find(description, 0)
                             if (match != null) {
                                 targetUrl = match.value
@@ -156,7 +194,7 @@ class Main : Plugin() {
             if (targetUrl == null && messageEntry.message.content != null) {
                  val contentStr = messageEntry.message.content
                  if (contentStr != null) {
-                     // 修正：明確傳入第二個參數 0 (startIndex)
+                     // 修正：明確傳入 startIndex = 0
                      val match = urlRegex.find(contentStr, 0)
                      if (match != null) {
                          targetUrl = match.value
