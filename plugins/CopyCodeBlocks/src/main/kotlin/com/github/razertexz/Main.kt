@@ -14,15 +14,13 @@ import com.aliucord.entities.Plugin
 import com.aliucord.patcher.*
 import com.aliucord.utils.DimenUtils
 
-// Discord 相關引用
+// Discord Imports
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.MessageEntry
 import com.discord.utilities.view.text.SimpleDraweeSpanTextView
-// 引用 Data 類別以便檢查列表長度
-import com.discord.widgets.chat.list.adapter.WidgetChatListAdapter$Data
 
-// 資源引用
+// Resources
 import com.lytefast.flexinput.R
 import rx.functions.Action0
 
@@ -31,80 +29,88 @@ class Main : Plugin() {
     private val ID_BTN_COPY_TEXT = 1001 
     private val ID_BTN_COPY_LINK = 1002
 
-    // 用來記錄數據更新前的狀態
+    // State tracking variables
     private var wasAtBottom = false
     private var oldListSize = 0
 
     override fun start(ctx: Context) {
         
         // ========================================================================
-        // 功能 1 (加強版): 防止自動跳轉 (Anti-Auto-Scroll)
-        // 包含：
-        // A. 閱讀歷史訊息時，新訊息不強制拉到底部 (之前的邏輯)
-        // B. 就在底部時，新訊息也不自動顯示 (新增的邏輯)
+        // Feature 1: Anti-Auto-Scroll
         // ========================================================================
         
-        // 1. 攔截 scrollToMessageId (防止 App 主動發出的跳轉指令)
+        // 1. Hook scrollToMessageId to prevent forced scrolling when reading history
         patcher.before<WidgetChatListAdapter>(
             "scrollToMessageId", 
-            Long::class.javaPrimitiveType, 
-            Action0::class.java
+            Long::class.javaPrimitiveType, // primitive long (J)
+            Action0::class.java            // Action0 interface
         ) {
             val adapter = it.thisObject as WidgetChatListAdapter
             val layoutManager = adapter.layoutManager
 
             if (layoutManager is LinearLayoutManager) {
+                // 0 is bottom in reverse layout
                 val firstVisible = layoutManager.findFirstVisibleItemPosition()
-                // 如果位置 > 5 (正在看歷史)，攔截跳轉
+                
+                // If user is scrolled up more than 5 items, block the scroll command
                 if (firstVisible > 5) {
                     it.result = null
                 }
             }
         }
 
-        // 2. 監聽數據更新 (setData)，處理「在底部時新訊息進來」的情況
+        // Access inner class using reflection because direct reference might fail
+        // or use the dot notation if the class is accessible. 
+        // Best approach for Aliucord plugins dealing with inner classes often involves Class.forName
+        val dataClass = try {
+            // Try standard access first
+            com.discord.widgets.chat.list.adapter.WidgetChatListAdapter.Data::class.java
+        } catch (e: Throwable) {
+            // Fallback to reflection string if direct access fails during compilation
+            Class.forName("com.discord.widgets.chat.list.adapter.WidgetChatListAdapter\$Data")
+        }
+
+        // 2. Hook setData (before) to record state
         patcher.before<WidgetChatListAdapter>(
             "setData",
-            WidgetChatListAdapter$Data::class.java
+            dataClass
         ) {
             val adapter = it.thisObject as WidgetChatListAdapter
             val layoutManager = adapter.layoutManager as? LinearLayoutManager ?: return@before
             
-            // 記錄更新前的狀態
-            // 0 是底部 (因為是 ReverseLayout)
+            // Check if we are currently at the bottom (index 0)
             wasAtBottom = layoutManager.findFirstVisibleItemPosition() == 0
             
-            // 記錄舊的列表長度
+            // Record current item count
             oldListSize = adapter.itemCount
         }
 
+        // 3. Hook setData (after) to correct position if needed
         patcher.after<WidgetChatListAdapter>(
             "setData",
-            WidgetChatListAdapter$Data::class.java
+            dataClass
         ) {
             val adapter = it.thisObject as WidgetChatListAdapter
             val layoutManager = adapter.layoutManager as? LinearLayoutManager ?: return@after
-            val newData = it.args[0] as WidgetChatListAdapter$Data
             
-            // 檢查是否真的有新項目增加 (避免編輯訊息或狀態更新時也觸發)
-            val isNewItemAdded = newData.list.size > oldListSize
+            // The argument 0 is the Data object. We need to cast it or use reflection to get the list size.
+            // Since accessing .list might be hard if it's obfuscated or kotlin property, 
+            // checking adapter.itemCount is safer and easier.
+            val newListSize = adapter.itemCount
+            
+            val isNewItemAdded = newListSize > oldListSize
 
-            // 核心邏輯：
-            // 如果原本在底部 (wasAtBottom) 且有新訊息進來 (isNewItemAdded)
-            // 我們強制滾動到 Index 1。
-            // 原理：新訊息是 Index 0，舊的最新訊息變成了 Index 1。
-            // 滾動到 1 等於「停留在原本看到的最後一條訊息」，把新訊息藏在下面。
+            // If we were at bottom AND a new item was added
+            // Force scroll to index 1 (the previous latest message) to hide the new one
             if (wasAtBottom && isNewItemAdded) {
                 adapter.recycler.post {
-                    // 使用 scrollToPositionWithOffset(1, 0)
-                    // 這會把 Index 1 (舊訊息) 鎖定在畫面底部
                     layoutManager.scrollToPositionWithOffset(1, 0)
                 }
             }
         }
 
         // ========================================================================
-        // 功能 2: 訊息複製按鈕 (Copy Buttons) - 保持不變
+        // Feature 2: Copy Buttons
         // ========================================================================
         val btnSize = DimenUtils.dpToPx(40)
         val btnPadding = DimenUtils.dpToPx(8)
@@ -126,7 +132,7 @@ class Main : Plugin() {
             val holder = it.thisObject as RecyclerView.ViewHolder
             val root = holder.itemView as ConstraintLayout
 
-            // --- 1. 藍色按鈕 (複製文字) ---
+            // --- 1. Blue Button (Copy Text) ---
             var btnText = root.findViewById<ImageView>(ID_BTN_COPY_TEXT)
             if (btnText == null) {
                 btnText = ImageView(root.context).apply {
@@ -148,10 +154,10 @@ class Main : Plugin() {
             btnText.setOnClickListener {
                 val content = messageEntry.message.content
                 Utils.setClipboard(content, content)
-                Utils.showToast("已複製文字！")
+                Utils.showToast("Copied Text!")
             }
 
-            // --- 2. 紅色按鈕 (複製連結) ---
+            // --- 2. Red Button (Copy Link) ---
             var targetUrl: String? = null
             val embeds = messageEntry.message.embeds
             if (embeds.isNotEmpty()) {
@@ -185,7 +191,7 @@ class Main : Plugin() {
                 val finalUrl = targetUrl
                 btnLink.setOnClickListener {
                     Utils.setClipboard(finalUrl, finalUrl)
-                    Utils.showToast("已複製連結！")
+                    Utils.showToast("Copied Link!")
                 }
             } else {
                 btnLink?.visibility = View.GONE
