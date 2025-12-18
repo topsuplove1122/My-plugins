@@ -125,20 +125,17 @@ class Main : Plugin() {
             var targetUrl: String? = null
             val embeds = messageEntry.message.embeds
             
-            // 定義 Regex (放在這裡比較清楚)
             val urlRegex = Regex("https?://[^\\s\\)\\]]+")
 
             if (embeds.isNotEmpty()) {
                 val embed = embeds[0]
                 
-                // 步驟 A: Title URL
                 try {
                     val urlField = embed::class.java.getDeclaredField("url")
                     urlField.isAccessible = true
                     targetUrl = urlField.get(embed) as String?
                 } catch (e: Exception) {}
 
-                // 步驟 B: Description URL
                 if (targetUrl == null || targetUrl!!.isEmpty()) {
                     try {
                         val descField = embed::class.java.getDeclaredField("description")
@@ -146,8 +143,8 @@ class Main : Plugin() {
                         val description = descField.get(embed) as String?
                         
                         if (description != null) {
-                            // 修正點 1: 明確傳入 input 參數
-                            val match = urlRegex.find(input = description)
+                            // 修正：移除具名參數 "input ="
+                            val match = urlRegex.find(description)
                             if (match != null) {
                                 targetUrl = match.value
                             }
@@ -156,12 +153,11 @@ class Main : Plugin() {
                 }
             }
 
-            // 步驟 C: Content URL
             if (targetUrl == null && messageEntry.message.content != null) {
-                 // 修正點 2: 明確傳入 input 參數，並確保 content 不為 null
                  val contentStr = messageEntry.message.content
                  if (contentStr != null) {
-                     val match = urlRegex.find(input = contentStr)
+                     // 修正：移除具名參數 "input ="
+                     val match = urlRegex.find(contentStr)
                      if (match != null) {
                          targetUrl = match.value
                      }
