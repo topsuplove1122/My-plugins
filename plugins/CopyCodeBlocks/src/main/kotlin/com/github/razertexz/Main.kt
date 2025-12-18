@@ -42,8 +42,8 @@ class Main : Plugin() {
         // 1. Hook scrollToMessageId to prevent forced scrolling when reading history
         patcher.before<WidgetChatListAdapter>(
             "scrollToMessageId", 
-            Long::class.javaPrimitiveType, // primitive long (J)
-            Action0::class.java            // Action0 interface
+            java.lang.Long.TYPE, // 使用 java.lang.Long.TYPE 確保是 primitive long (J)
+            Action0::class.java            
         ) {
             val adapter = it.thisObject as WidgetChatListAdapter
             val layoutManager = adapter.layoutManager
@@ -59,14 +59,9 @@ class Main : Plugin() {
             }
         }
 
-        // Access inner class using reflection because direct reference might fail
-        // or use the dot notation if the class is accessible. 
-        // Best approach for Aliucord plugins dealing with inner classes often involves Class.forName
         val dataClass = try {
-            // Try standard access first
             com.discord.widgets.chat.list.adapter.WidgetChatListAdapter.Data::class.java
         } catch (e: Throwable) {
-            // Fallback to reflection string if direct access fails during compilation
             Class.forName("com.discord.widgets.chat.list.adapter.WidgetChatListAdapter\$Data")
         }
 
@@ -93,9 +88,6 @@ class Main : Plugin() {
             val adapter = it.thisObject as WidgetChatListAdapter
             val layoutManager = adapter.layoutManager as? LinearLayoutManager ?: return@after
             
-            // The argument 0 is the Data object. We need to cast it or use reflection to get the list size.
-            // Since accessing .list might be hard if it's obfuscated or kotlin property, 
-            // checking adapter.itemCount is safer and easier.
             val newListSize = adapter.itemCount
             
             val isNewItemAdded = newListSize > oldListSize
