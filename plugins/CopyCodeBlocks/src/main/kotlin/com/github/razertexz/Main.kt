@@ -36,10 +36,10 @@ class Main : Plugin() {
     override fun start(ctx: Context) {
         
         // ========================================================================
-        // Feature 1: 完美防跳轉 (Perfect Anti-Auto-Scroll)
+        // Feature 1: 強力防跳轉 (Strong Anti-Auto-Scroll)
         // ========================================================================
         
-        // [A] 攔截系統主動的滾動指令
+        // [A] 攔截系統的主動跳轉指令
         patcher.before<WidgetChatListAdapter>(
             "scrollToMessageId", 
             java.lang.Long.TYPE, 
@@ -49,8 +49,8 @@ class Main : Plugin() {
             val layoutManager = adapter.layoutManager
 
             if (layoutManager is LinearLayoutManager) {
-                // 如果我們不在最底部 (Index > 0)，或是我們剛做過 "微調" 操作
-                // 拒絕系統的跳轉指令
+                // 如果目前不在絕對底部 (Index 0 且 offset 0)，拒絕任何外部跳轉指令
+                // 這防止 App 在載入時強迫你回到最下面
                 val firstVisible = layoutManager.findFirstVisibleItemPosition()
                 if (firstVisible > 0) {
                     it.result = null
@@ -64,7 +64,7 @@ class Main : Plugin() {
             Class.forName("com.discord.widgets.chat.list.adapter.WidgetChatListAdapter\$Data")
         }
 
-        // [B] 數據更新前：執行 "微調 (Micro-Scroll)"
+        // [B] 數據更新前：製造 "正在看歷史訊息" 的假象
         patcher.before<WidgetChatListAdapter>(
             "setData",
             dataClass
@@ -74,24 +74,24 @@ class Main : Plugin() {
             
             oldListSize = adapter.itemCount
 
-            // 檢查是否 "完全" 在底部 (Index 0 且完全可見)
+            // 檢查是否在底部 (Index 0)
             val firstVisible = layoutManager.findFirstVisibleItemPosition()
-            val completelyVisible = layoutManager.findFirstCompletelyVisibleItemPosition()
             
-            // 如果使用者目前完全貼在底部 (這是導致強制跳轉的原因)
-            if (firstVisible == 0 || completelyVisible == 0) {
+            // 只要你是看著最新的訊息 (Index 0)，不管是貼底還是稍微往上，都視為在底部
+            if (firstVisible == 0) {
                 wasAtBottom = true
                 
-                // 【關鍵修改】：主動幫使用者 "往上拉一點點"
-                // scrollBy(0, 1) 在 Reverse Layout 中通常代表讓內容稍微位移
-                // 這會破壞系統的 "Anchor to Bottom" 判定
-                adapter.recycler.scrollBy(0, 10)
+                // 【關鍵修改】：大幅度往上推
+                // 使用 scrollToPositionWithOffset(0, 150)
+                // 意思：把第 0 個項目 (最新訊息) 的底部，放在距離視窗底部 150px 的位置
+                // 這會造成明顯的位移，讓系統絕對相信 "使用者往上滑了"
+                layoutManager.scrollToPositionWithOffset(0, 150)
             } else {
                 wasAtBottom = false
             }
         }
 
-        // [C] 數據更新後：執行位置修正
+        // [C] 數據更新後：校正回歸
         patcher.after<WidgetChatListAdapter>(
             "setData",
             dataClass
@@ -102,14 +102,13 @@ class Main : Plugin() {
             val newListSize = adapter.itemCount
             val isNewItemAdded = newListSize > oldListSize
 
-            // 如果原本在底部 (wasAtBottom) 且有新訊息進來 (isNewItemAdded)
-            // 因為我們在 [B] 做了微調，系統現在認為我們是 "正在看歷史訊息"，所以可能不會自動跳轉。
-            // 但為了保險起見，我們還是強制將視圖鎖定在 Index 1 (原本的最新訊息)。
             if (wasAtBottom && isNewItemAdded) {
+                // 不需要延遲太久，因為我們在 Before 已經改變了狀態
                 adapter.recycler.post {
                     try {
-                        // 強制鎖定到 Index 1 (舊訊息的位置)
-                        // 使用 offset 0 讓它貼齊底部
+                        // 【關鍵校正】：把視窗鎖定到原本的那則訊息
+                        // 新訊息進來後，原本的 Index 0 變成了 Index 1
+                        // 我們把 Index 1 貼齊底部 (Offset 0)
                         layoutManager.scrollToPositionWithOffset(1, 0)
                     } catch (e: Exception) { e.printStackTrace() }
                 }
@@ -117,7 +116,7 @@ class Main : Plugin() {
         }
 
         // ========================================================================
-        // Feature 2: 複製按鈕 (保持原樣)
+        // Feature 2: 複製按鈕 (保持原樣，無須修改)
         // ========================================================================
         val btnSize = DimenUtils.dpToPx(40)
         val btnPadding = DimenUtils.dpToPx(8)
